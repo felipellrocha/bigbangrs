@@ -1,0 +1,13 @@
+[package]
+name = "bigbang"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wgpu = "28.0.0"
+anyhow = "1.0"
+winit = { version = "0.30", features = ["android-native-activity"] }
+env_logger = "0.10"
+log = "0.4"
+pollster = "0.3"
+bytemuck = { version = "1.24", features = [ "derive" ] }
