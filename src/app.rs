@@ -19,7 +19,7 @@ const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(
 );
 
 pub struct App {
-    state: Option<State>,
+    state: Option<Renderer>,
 }
 
 impl App {
@@ -38,7 +38,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler<State> for App {
+impl ApplicationHandler<Renderer> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window = Arc::new(
             event_loop
@@ -46,7 +46,7 @@ impl ApplicationHandler<State> for App {
                 .unwrap(),
         );
 
-        let mut state = pollster::block_on(State::new(window)).unwrap();
+        let mut state = pollster::block_on(Renderer::new(window)).unwrap();
 
         let size = state.window.inner_size();
         state.resize(size.width, size.height);
@@ -56,7 +56,7 @@ impl ApplicationHandler<State> for App {
     }
 
     #[allow(unused_mut)]
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: State) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: Renderer) {
         // This is where proxy.send_event() ends up
         self.state = Some(event);
     }
@@ -105,7 +105,7 @@ impl ApplicationHandler<State> for App {
 }
 
 // This will store the state of our game
-pub struct State {
+pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -126,7 +126,7 @@ pub struct State {
     depth: Texture,
 }
 
-impl State {
+impl Renderer {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
