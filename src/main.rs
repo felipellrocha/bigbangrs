@@ -1,4 +1,5 @@
 mod app;
+mod texture;
 
 use crate::app::App;
 
