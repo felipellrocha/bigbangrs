@@ -1,5 +1,6 @@
 use crate::texture::Texture;
 use cgmath::prelude::*;
+use flume::bounded;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
@@ -19,7 +20,7 @@ const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(
 );
 
 pub struct App {
-    state: Option<Renderer>,
+    state: Option<Pipeline>,
 }
 
 impl App {
@@ -38,7 +39,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler<Renderer> for App {
+impl ApplicationHandler<Pipeline> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window = Arc::new(
             event_loop
@@ -46,17 +47,17 @@ impl ApplicationHandler<Renderer> for App {
                 .unwrap(),
         );
 
-        let mut state = pollster::block_on(Renderer::new(window)).unwrap();
+        let mut state = pollster::block_on(Pipeline::new(window)).unwrap();
 
-        let size = state.window.inner_size();
-        state.resize(size.width, size.height);
-        state.window.request_redraw();
+        let size = state.renderer.window.inner_size();
+        state.renderer.resize(size.width, size.height);
+        state.renderer.window.request_redraw();
 
         self.state = Some(state);
     }
 
     #[allow(unused_mut)]
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: Renderer) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: Pipeline) {
         // This is where proxy.send_event() ends up
         self.state = Some(event);
     }
@@ -74,7 +75,7 @@ impl ApplicationHandler<Renderer> for App {
 
         match event {
             WindowEvent::Resized(size) => {
-                state.resize(size.width, size.height);
+                state.renderer.resize(size.width, size.height);
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -84,15 +85,21 @@ impl ApplicationHandler<Renderer> for App {
                         ..
                     },
                 ..
-            } => state.handle_key(event_loop, code, key_state.is_pressed()),
+            } => state
+                .renderer
+                .handle_key(event_loop, code, key_state.is_pressed()),
             WindowEvent::RedrawRequested => {
-                state.update();
-                match state.render() {
+                //state.movement.update();
+                if let Err(error) = pollster::block_on(state.movement.update()) {
+                    log::error!("Movement update failed: {}", error);
+                }
+                state.renderer.update();
+                match state.renderer.render() {
                     Ok(_) => {}
                     // Reconfigure the surface if it's lost or outdated
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                        let size = state.window.inner_size();
-                        state.resize(size.width, size.height);
+                        let size = state.renderer.window.inner_size();
+                        state.renderer.resize(size.width, size.height);
                     }
                     Err(e) => {
                         log::error!("Unable to render {}", e);
@@ -104,7 +111,19 @@ impl ApplicationHandler<Renderer> for App {
     }
 }
 
-// This will store the state of our game
+pub struct Pipeline {
+    renderer: Renderer,
+    movement: Movement,
+}
+
+impl Pipeline {
+    pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+        let movement = Movement::new().await.unwrap();
+        let renderer = Renderer::new(window).await.unwrap();
+        Ok(Self { renderer, movement })
+    }
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -415,12 +434,19 @@ impl Renderer {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
+            {
+                // compute
+            }
+            {
+                // draw
+                render_pass.set_pipeline(&self.render_pipeline);
+                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
+            }
         }
 
         // submit will accept anything that implements IntoIter
@@ -447,6 +473,151 @@ impl Renderer {
                 self.camera_controller.handle_key(code, is_pressed);
             }
         }
+    }
+}
+
+pub struct Movement {
+    pipeline: wgpu::ComputePipeline,
+    input_data: Vec<f32>,
+    input_buffer: wgpu::Buffer,
+    output_buffer: wgpu::Buffer,
+    read_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    sender: flume::Sender<Vec<u32>>,
+    receiver: flume::Receiver<Vec<u32>>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+}
+
+impl Movement {
+    pub async fn new() -> anyhow::Result<Self> {
+        //let input_data: Vec<f32> = vec![0.0; 100];
+        let input_data: Vec<f32> = (0..100).map(|index| index as f32).collect();
+
+        let instance = wgpu::Instance::new(&Default::default());
+        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+        let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+
+        let shader = device.create_shader_module(wgpu::include_wgsl!("movement.wgsl"));
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Introduction Compute Pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: None,
+            compilation_options: Default::default(),
+            cache: Default::default(),
+        });
+
+        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("input"),
+            contents: bytemuck::cast_slice(&input_data),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+        });
+
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("output"),
+            size: input_buffer.size(),
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let read_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("read"),
+            size: input_buffer.size(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let (sender, receiver) = bounded(1);
+
+        Ok(Self {
+            pipeline,
+            device,
+            queue,
+
+            input_data,
+            input_buffer,
+            output_buffer,
+            read_buffer,
+            bind_group,
+            sender,
+            receiver,
+        })
+    }
+
+    async fn update(&mut self) -> anyhow::Result<()> {
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+
+        {
+            // We specified 64 threads per workgroup in the shader, so we need to compute how many
+            // workgroups we need to dispatch.
+            let num_dispatches = self.input_data.len().div_ceil(64) as u32;
+
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.dispatch_workgroups(num_dispatches, 1, 1);
+        }
+
+        encoder.copy_buffer_to_buffer(
+            &self.output_buffer,
+            0,
+            &self.read_buffer,
+            0,
+            self.output_buffer.size(),
+        );
+
+        self.queue.submit([encoder.finish()]);
+
+        {
+            // The mapping process is async, so we'll need to create a channel to get
+            // the success flag for our mapping
+            let (tx, rx) = bounded(1);
+
+            // We send the success or failure of our mapping via a callback
+            self.read_buffer
+                .map_async(wgpu::MapMode::Read, .., move |result| {
+                    tx.send(result).unwrap()
+                });
+
+            // The callback we submitted to map async will only get called after the
+            // device is polled or the queue submitted
+            self.device.poll(wgpu::PollType::wait_indefinitely())?;
+
+            // We check if the mapping was successful here
+            rx.recv_async().await??;
+
+            // We then get the bytes that were stored in the buffer
+            let output_data = self.read_buffer.get_mapped_range(..);
+
+            // Now we have the data on the CPU we can do what ever we want to with it
+            //assert_eq!(&self.input_data, bytemuck::cast_slice(&output_data));
+            println!(
+                "output: {:?}",
+                bytemuck::cast_slice::<u8, u32>(&output_data)
+            );
+        }
+
+        // We need to unmap the buffer to be able to use it again
+        self.read_buffer.unmap();
+
+        Ok(())
     }
 }
 
