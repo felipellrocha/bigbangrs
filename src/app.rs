@@ -171,16 +171,16 @@ impl Pipeline {
                             cgmath::Deg(45.0),
                         )
                     };
-                    let r: f32 = random_generator.random();
-                    let g: f32 = random_generator.random();
-                    let b: f32 = random_generator.random();
+                    // let r: f32 = random_generator.random();
+                    // let g: f32 = random_generator.random();
+                    // let b: f32 = random_generator.random();
 
-                    let color = [r, g, b, 1.0];
+                    let force = [0.0, 0.0, 0.0, 1.0];
 
                     Instance {
                         translation,
                         rotation,
-                        color,
+                        force,
                     }
                 })
                 .collect::<Vec<_>>();
@@ -199,9 +199,16 @@ impl Pipeline {
 
         let space = VoxelSpace::new(&shared.device, &instances).await.unwrap();
         let camera = GlobalCamera::new(&shared.device).await.unwrap();
-        let movement = Movement::new(&shared.device, &shared.queue, &instances, &camera.buffer)
-            .await
-            .unwrap();
+        let movement = Movement::new(
+            &shared.device,
+            &shared.queue,
+            &instances,
+            &camera.buffer,
+            &space.buffers.0,
+            &space.grid_uniform_buffer,
+        )
+        .await
+        .unwrap();
         let renderer = Renderer::new(
             window,
             surface,
@@ -614,14 +621,15 @@ impl Movement {
         _queue: &wgpu::Queue,
         instances: &wgpu::Buffer,
         camera_buffer: &wgpu::Buffer,
+        voxel_values_buffer: &wgpu::Buffer,
+        volume_grid_buffer: &wgpu::Buffer,
     ) -> anyhow::Result<Self> {
         let shader = device.create_shader_module(wgpu::include_wgsl!("movement.wgsl"));
 
         let simulation_uniform = SimulationUniform {
             time: 0.0,
-            amplitude: 1.0,
-            frequency: 0.75,
-            speed: 1.0,
+            delta_time: 0.016,
+            gravity_strength: 2.0,
             particle_count: NUM_INSTANCES,
             workgroups_per_row: 1,
             padding: Default::default(),
@@ -713,6 +721,26 @@ impl Movement {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -739,6 +767,14 @@ impl Movement {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: indirect_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: voxel_values_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: volume_grid_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -772,7 +808,7 @@ impl Movement {
     fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<()> {
         let mut encoder = device.create_command_encoder(&Default::default());
 
-        let workgroup_size: u32 = 64;
+        let workgroup_size: u32 = 256;
         let total_workgroups = NUM_INSTANCES.div_ceil(workgroup_size);
 
         let workgroups_per_row: u32 = 1024;
@@ -782,9 +818,8 @@ impl Movement {
             let elapsed_seconds = self.start_time.elapsed().as_secs_f32();
             let uniform = SimulationUniform {
                 time: elapsed_seconds,
-                amplitude: 1.0,
-                frequency: 0.75,
-                speed: 1.5,
+                delta_time: 0.016,
+                gravity_strength: 2.0,
                 particle_count: NUM_INSTANCES,
                 workgroups_per_row,
                 padding: Default::default(),
@@ -822,7 +857,7 @@ impl Movement {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     position: [f32; 4],
-    //color: [f32; 3],
+    //force: [f32; 3],
 }
 const QUAD_SIZE: f32 = 0.01;
 const VERTICES: &[Vertex] = &[
@@ -1014,7 +1049,7 @@ impl CameraUniform {
 }
 
 struct Instance {
-    color: [f32; 4],
+    force: [f32; 4],
     translation: cgmath::Vector4<f32>,
     rotation: cgmath::Quaternion<f32>,
 }
@@ -1022,7 +1057,7 @@ struct Instance {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct InstanceRaw {
-    color: [f32; 4],
+    force: [f32; 4],
     translation: [f32; 4],
     rotation: [f32; 4],
 }
@@ -1030,7 +1065,7 @@ struct InstanceRaw {
 impl Instance {
     fn to_raw(&self) -> InstanceRaw {
         InstanceRaw {
-            color: self.color.clone(),
+            force: self.force.clone(),
             translation: self.translation.into(),
             rotation: self.rotation.into(),
         }
@@ -1075,9 +1110,8 @@ impl InstanceRaw {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct SimulationUniform {
     time: f32,
-    amplitude: f32,
-    frequency: f32,
-    speed: f32,
+    delta_time: f32,
+    gravity_strength: f32,
     particle_count: u32,
     workgroups_per_row: u32,
     padding: [u32; 2],
