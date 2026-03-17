@@ -13,7 +13,7 @@ use winit::{
     window::Window,
 };
 
-const NUM_INSTANCES: u32 = 10_000;
+const NUM_INSTANCES: u32 = 100_000;
 
 pub struct App {
     state: Option<Pipeline>,
@@ -447,9 +447,9 @@ impl Renderer {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -638,35 +638,27 @@ impl Movement {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
-    translation: [f32; 4],
+    position: [f32; 4],
     //color: [f32; 3],
 }
+const QUAD_SIZE: f32 = 0.01;
 const VERTICES: &[Vertex] = &[
     Vertex {
-        translation: [-0.0868241, 0.49240386, 0.0, 1.0],
-        //color: [0.5, 0.0, 0.5],
-    }, // A
+        position: [-QUAD_SIZE, -QUAD_SIZE, 0.0, 1.0],
+    },
     Vertex {
-        translation: [-0.49513406, 0.06958647, 0.0, 1.0],
-        //color: [0.5, 0.0, 0.5],
-    }, // B
+        position: [QUAD_SIZE, -QUAD_SIZE, 0.0, 1.0],
+    },
     Vertex {
-        translation: [-0.21918549, -0.44939706, 0.0, 1.0],
-        //color: [0.5, 0.0, 0.5],
-    }, // C
+        position: [QUAD_SIZE, QUAD_SIZE, 0.0, 1.0],
+    },
     Vertex {
-        translation: [0.35966998, -0.3473291, 0.0, 1.0],
-        //color: [0.5, 0.0, 0.5],
-    }, // D
-    Vertex {
-        translation: [0.44147372, 0.2347359, 0.0, 1.0],
-        //color: [0.5, 0.0, 0.5],
-    }, // E
+        position: [-QUAD_SIZE, QUAD_SIZE, 0.0, 1.0],
+    },
 ];
 const INDICES: &[u16] = &[
-    0, 1, 4, //
-    1, 2, 4, //
-    2, 3, 4,
+    0, 1, 2, //
+    0, 2, 3,
 ];
 
 impl Vertex {
