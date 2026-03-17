@@ -14,6 +14,8 @@ use winit::{
 };
 
 const NUM_INSTANCES: u32 = 1_000_000;
+//const DELTA_TIME: f32 = 0.016;
+const DELTA_TIME: f32 = 0.0016;
 
 pub struct App {
     pipeline: Option<Pipeline>,
@@ -101,9 +103,11 @@ impl ApplicationHandler<Pipeline> for App {
                 let _ = pipeline
                     .space
                     .update(&pipeline.shared.device, &pipeline.shared.queue);
-                let _ = pipeline
-                    .movement
-                    .update(&pipeline.shared.device, &pipeline.shared.queue);
+                let _ = pipeline.movement.update(
+                    &pipeline.shared.device,
+                    &pipeline.shared.queue,
+                    pipeline.space.current_is_a,
+                );
                 pipeline.renderer.update(
                     &pipeline.shared.queue,
                     &mut pipeline.camera.data,
@@ -205,6 +209,7 @@ impl Pipeline {
             &instances,
             &camera.buffer,
             &space.buffers.0,
+            &space.buffers.1,
             &space.grid_uniform_buffer,
         )
         .await
@@ -607,7 +612,7 @@ impl Renderer {
 pub struct Movement {
     pipeline: wgpu::ComputePipeline,
     simulation_buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    bind_groups: (wgpu::BindGroup, wgpu::BindGroup),
     #[allow(unused)]
     instances: wgpu::Buffer,
     visible_instances: wgpu::Buffer,
@@ -621,14 +626,15 @@ impl Movement {
         _queue: &wgpu::Queue,
         instances: &wgpu::Buffer,
         camera_buffer: &wgpu::Buffer,
-        voxel_values_buffer: &wgpu::Buffer,
+        voxel_values_buffer_a: &wgpu::Buffer,
+        voxel_values_buffer_b: &wgpu::Buffer,
         volume_grid_buffer: &wgpu::Buffer,
     ) -> anyhow::Result<Self> {
         let shader = device.create_shader_module(wgpu::include_wgsl!("movement.wgsl"));
 
         let simulation_uniform = SimulationUniform {
             time: 0.0,
-            delta_time: 0.016,
+            delta_time: DELTA_TIME,
             gravity_strength: 2.0,
             particle_count: NUM_INSTANCES,
             workgroups_per_row: 1,
@@ -744,8 +750,8 @@ impl Movement {
             ],
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Movement Bind Group"),
+        let bind_group_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Movement Bind Group A"),
             layout: &bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -770,7 +776,43 @@ impl Movement {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: voxel_values_buffer.as_entire_binding(),
+                    resource: voxel_values_buffer_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: volume_grid_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // CHANGED: movement bind group that samples voxel buffer B.
+        let bind_group_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Movement Bind Group B"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: instances.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: simulation_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: visible_instances.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: indirect_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: voxel_values_buffer_b.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
@@ -796,7 +838,7 @@ impl Movement {
 
         Ok(Self {
             pipeline,
-            bind_group,
+            bind_groups: (bind_group_a, bind_group_b),
             simulation_buffer,
             instances: instances.clone(),
             visible_instances,
@@ -805,7 +847,12 @@ impl Movement {
         })
     }
 
-    fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<()> {
+    fn update(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        sample_buffer_is_a: bool,
+    ) -> anyhow::Result<()> {
         let mut encoder = device.create_command_encoder(&Default::default());
 
         let workgroup_size: u32 = 256;
@@ -818,7 +865,7 @@ impl Movement {
             let elapsed_seconds = self.start_time.elapsed().as_secs_f32();
             let uniform = SimulationUniform {
                 time: elapsed_seconds,
-                delta_time: 0.016,
+                delta_time: DELTA_TIME,
                 gravity_strength: 2.0,
                 particle_count: NUM_INSTANCES,
                 workgroups_per_row,
@@ -840,10 +887,16 @@ impl Movement {
             queue.write_buffer(&self.indirect_buffer, 0, bytemuck::bytes_of(&indirect_args))
         }
 
+        let active_bind_group = if sample_buffer_is_a {
+            &self.bind_groups.0
+        } else {
+            &self.bind_groups.1
+        };
+
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_bind_group(0, active_bind_group, &[]);
             pass.dispatch_workgroups(workgroups_per_row, workgroup_rows, 1);
         }
 
@@ -1114,7 +1167,7 @@ struct SimulationUniform {
     gravity_strength: f32,
     particle_count: u32,
     workgroups_per_row: u32,
-    padding: [u32; 2],
+    padding: u32,
 }
 
 #[repr(C)]
@@ -1456,6 +1509,7 @@ impl VoxelSpace {
         }
 
         queue.submit(std::iter::once(encoder.finish()));
+        self.current_is_a = !self.current_is_a;
 
         Ok(())
     }
