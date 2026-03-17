@@ -1094,17 +1094,19 @@ struct DrawIndexedIndirectArgsStorage {
 }
 
 pub struct VoxelSpace {
-    buffer: wgpu::Buffer,
+    buffers: (wgpu::Buffer, wgpu::Buffer),
+
     voxels: wgpu::Texture,
     voxel_view: wgpu::TextureView,
     grid_uniform: VolumeGridUniform,
     grid_uniform_buffer: wgpu::Buffer,
-    bind_group_layout: wgpu::BindGroupLayout,
-    bind_group: wgpu::BindGroup,
+    //bind_group_layout: wgpu::BindGroupLayout,
+    bind_groups: (wgpu::BindGroup, wgpu::BindGroup),
 
     decay: wgpu::ComputePipeline,
     splat: wgpu::ComputePipeline,
     write: wgpu::ComputePipeline,
+    current_is_a: bool,
 }
 
 impl VoxelSpace {
@@ -1117,14 +1119,24 @@ impl VoxelSpace {
 
         let voxel_buffer_size_bytes = voxel_count as u64 * std::mem::size_of::<u32>() as u64;
 
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Voxel Accumulation Buffer"),
-            size: voxel_buffer_size_bytes,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+        let buffers = (
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Voxel Accumulation Buffer - A"),
+                size: voxel_buffer_size_bytes,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Voxel Accumulation Buffer - B"),
+                size: voxel_buffer_size_bytes,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+        );
 
         let voxels = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Volume Texture"),
@@ -1167,13 +1179,13 @@ impl VoxelSpace {
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Volume Bind Group Layout"),
+            label: Some("Voxel Bind Group Layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -1193,7 +1205,7 @@ impl VoxelSpace {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -1201,6 +1213,26 @@ impl VoxelSpace {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
@@ -1212,43 +1244,98 @@ impl VoxelSpace {
             ],
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Volume Bind Group"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: instances.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: grid_uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&voxel_view),
-                },
-            ],
-        });
+        let bind_groups = (
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Voxel Bind Group A To B"),
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: instances.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: buffers.1.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: buffers.0.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: buffers.1.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: grid_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&voxel_view),
+                    },
+                ],
+            }),
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Voxel Bind Group B To A"),
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: instances.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: buffers.0.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: buffers.1.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: buffers.0.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: grid_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&voxel_view),
+                    },
+                ],
+            }),
+        );
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Volume Accumulation Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("voxels.wgsl").into()),
         });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Volume Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            immediate_size: 0,
-        });
+        let splat_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Voxel Splat Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                immediate_size: 0,
+            });
+
+        let decay_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Voxel Decay Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                immediate_size: 0,
+            });
+
+        let write_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Voxel Write Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                immediate_size: 0,
+            });
 
         let decay = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Decay Volume Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&decay_pipeline_layout),
             module: &shader,
             entry_point: Some("decay_volume"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -1257,7 +1344,7 @@ impl VoxelSpace {
 
         let splat = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Splat Points Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&splat_pipeline_layout),
             module: &shader,
             entry_point: Some("splat_points"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -1266,7 +1353,7 @@ impl VoxelSpace {
 
         let write = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Write Volume Texture Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&write_pipeline_layout),
             module: &shader,
             entry_point: Some("write_volume_texture"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -1274,43 +1361,67 @@ impl VoxelSpace {
         });
 
         Ok(Self {
-            buffer,
+            buffers,
             voxels,
             voxel_view,
             grid_uniform,
             grid_uniform_buffer,
-            bind_group_layout,
-            bind_group,
+
+            bind_groups,
 
             decay,
             splat,
             write,
+            current_is_a: true,
         })
     }
 
-    fn update(&mut self, device: &wgpu::Device, _queue: &wgpu::Queue) -> anyhow::Result<()> {
+    fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<()> {
         let mut encoder = device.create_command_encoder(&Default::default());
 
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Volume Compute Pass"),
-            timestamp_writes: None,
-        });
-        pass.set_bind_group(0, &self.bind_group, &[]);
+        let active_bind_group = if self.current_is_a {
+            &self.bind_groups.0
+        } else {
+            &self.bind_groups.1
+        };
 
         let dispatch_x = self.grid_uniform.width.div_ceil(8);
         let dispatch_y = self.grid_uniform.height.div_ceil(8);
         let dispatch_z = self.grid_uniform.depth.div_ceil(8);
+        let dispatch_count = self.grid_uniform.point_count.div_ceil(256);
 
-        pass.set_pipeline(&self.decay);
-        pass.dispatch_workgroups(dispatch_x, dispatch_y, dispatch_z);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Volume Compute Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_bind_group(0, active_bind_group, &[]);
+            pass.set_pipeline(&self.decay);
+            pass.dispatch_workgroups(dispatch_x, dispatch_y, dispatch_z);
+        }
 
-        let point_dispatch_count = self.grid_uniform.point_count.div_ceil(256);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Volume Compute Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_bind_group(0, active_bind_group, &[]);
 
-        pass.set_pipeline(&self.splat);
-        pass.dispatch_workgroups(point_dispatch_count, 1, 1);
+            pass.set_pipeline(&self.splat);
+            pass.dispatch_workgroups(dispatch_count, 1, 1);
+        }
 
-        pass.set_pipeline(&self.write);
-        pass.dispatch_workgroups(dispatch_x, dispatch_y, dispatch_z);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Volume Compute Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_bind_group(0, active_bind_group, &[]);
+            pass.set_pipeline(&self.write);
+            pass.dispatch_workgroups(dispatch_x, dispatch_y, dispatch_z);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
 
         Ok(())
     }

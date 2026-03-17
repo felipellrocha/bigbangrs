@@ -23,15 +23,23 @@ struct InstanceBuffer {
 };
 
 @group(0) @binding(0)
-var<storage, read_write> instances: InstanceBuffer;
+var<storage, read> instances: InstanceBuffer;
 
 @group(0) @binding(1)
 var<storage, read_write> voxel_values: array<atomic<u32>>;
 
+// new: source buffer for blur
 @group(0) @binding(2)
+var<storage, read> voxel_values_in: array<u32>;
+
+// new: destination buffer for blur
+@group(0) @binding(3)
+var<storage, read_write> voxel_values_out: array<u32>;
+
+@group(0) @binding(4)
 var<uniform> volume_grid: VolumeGridUniform;
 
-@group(0) @binding(3)
+@group(0) @binding(5)
 var volume_texture: texture_storage_3d<r32float, write>;
 
 fn voxel_index(x: u32, y: u32, z: u32) -> u32 {
@@ -79,10 +87,39 @@ fn decay_volume(
     return;
   }
 
-  let index = voxel_index(global_id.x, global_id.y, global_id.z);
-  let current_value_fixed = atomicLoad(&voxel_values[index]);
-  let decayed_value_fixed = u32(f32(current_value_fixed) * 0.25);
-  atomicStore(&voxel_values[index], decayed_value_fixed);
+  let center_x = i32(global_id.x);
+  let center_y = i32(global_id.y);
+  let center_z = i32(global_id.z);
+
+  var sum_fixed: u32 = 0u;
+
+  for (var z_offset: i32 = -1; z_offset <= 1; z_offset = z_offset + 1) {
+    for (var y_offset: i32 = -1; y_offset <= 1; y_offset = y_offset + 1) {
+      for (var x_offset: i32 = -1; x_offset <= 1; x_offset = x_offset + 1) {
+        let sample_x = center_x + x_offset;
+        let sample_y = center_y + y_offset;
+        let sample_z = center_z + z_offset;
+
+        if (!is_in_bounds(sample_x, sample_y, sample_z)) {
+          continue;
+        }
+
+        let sample_index = voxel_index(
+          u32(sample_x),
+          u32(sample_y),
+          u32(sample_z)
+        );
+
+        sum_fixed = sum_fixed + voxel_values_in[sample_index];
+      }
+    }
+  }
+
+  let output_index = voxel_index(global_id.x, global_id.y, global_id.z);
+
+  // Each source voxel contributes 1/27 to each voxel in its neighborhood.
+  // This is equivalent to averaging the 3x3x3 neighborhood once here.
+  voxel_values_out[output_index] = sum_fixed / 27u;
 }
 
 @compute @workgroup_size(256)
