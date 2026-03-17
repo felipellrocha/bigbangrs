@@ -13,7 +13,7 @@ use winit::{
     window::Window,
 };
 
-const NUM_INSTANCES: u32 = 2_000_000;
+const NUM_INSTANCES: u32 = 5_000_000;
 
 pub struct App {
     state: Option<Pipeline>,
@@ -144,12 +144,17 @@ impl Pipeline {
             })
             .await?;
 
+        let adapter_limits = adapter.limits();
+        println!("limits: {adapter_limits:#?}\n");
+        //let mut required_limits = wgpu::Limits::default();
+        //required_limits.max_buffer_size = adapter_limits.max_buffer_size;
+        //println!("limits: {required_limits:#?}");
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::empty(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                required_limits: wgpu::Limits::default(),
+                required_limits: adapter_limits,
                 memory_hints: Default::default(),
                 trace: wgpu::Trace::Off,
             })
@@ -511,7 +516,7 @@ impl Renderer {
 
 pub struct Movement {
     pipeline: wgpu::ComputePipeline,
-    time_buffer: wgpu::Buffer,
+    simulation_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     #[allow(unused)]
     instances: wgpu::Buffer,
@@ -526,15 +531,18 @@ impl Movement {
     ) -> anyhow::Result<Self> {
         let shader = device.create_shader_module(wgpu::include_wgsl!("movement.wgsl"));
 
-        let time_uniform = TimeUniform {
+        let simulation_uniform = SimulationUniform {
             time: 0.0,
             amplitude: 1.0,
             frequency: 0.75,
             speed: 1.0,
+            particle_count: NUM_INSTANCES,
+            workgroups_per_row: 1,
+            padding: Default::default(),
         };
-        let time_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Time Buffer"),
-            contents: bytemuck::bytes_of(&time_uniform),
+        let simulation_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Simulation Buffer"),
+            contents: bytemuck::bytes_of(&simulation_uniform),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -574,7 +582,7 @@ impl Movement {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: time_buffer.as_entire_binding(),
+                    resource: simulation_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -597,7 +605,7 @@ impl Movement {
         Ok(Self {
             pipeline,
             bind_group,
-            time_buffer,
+            simulation_buffer,
             instances: instances.clone(),
             start_time: Instant::now(),
         })
@@ -606,18 +614,28 @@ impl Movement {
     async fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<()> {
         let mut encoder = device.create_command_encoder(&Default::default());
 
+        let workgroup_size: u32 = 64;
+        let total_workgroups = NUM_INSTANCES.div_ceil(workgroup_size);
+
+        let workgroups_per_row: u32 = 1024;
+        let workgroup_rows = total_workgroups.div_ceil(workgroups_per_row);
+
         {
             let elapsed_seconds = self.start_time.elapsed().as_secs_f32();
-            let uniform = TimeUniform {
+            let uniform = SimulationUniform {
                 time: elapsed_seconds,
                 amplitude: 1.0,
                 frequency: 0.75,
                 speed: 1.5,
+                particle_count: NUM_INSTANCES,
+                workgroups_per_row,
+                padding: Default::default(),
             };
 
-            queue.write_buffer(&self.time_buffer, 0, bytemuck::bytes_of(&uniform));
+            queue.write_buffer(&self.simulation_buffer, 0, bytemuck::bytes_of(&uniform));
         }
 
+        /*
         {
             // We specified 64 threads per workgroup in the shader, so we need to compute how many
             // workgroups we need to dispatch.
@@ -627,6 +645,14 @@ impl Movement {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.dispatch_workgroups(num_dispatches, 1, 1);
+        }
+        */
+
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.dispatch_workgroups(workgroups_per_row, workgroup_rows, 1);
         }
 
         queue.submit([encoder.finish()]);
@@ -890,9 +916,12 @@ impl InstanceRaw {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct TimeUniform {
+struct SimulationUniform {
     time: f32,
     amplitude: f32,
     frequency: f32,
     speed: f32,
+    particle_count: u32,
+    workgroups_per_row: u32,
+    padding: [u32; 2],
 }

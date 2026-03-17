@@ -11,28 +11,35 @@ struct InstanceBuffer {
   values: array<InstanceRaw>,
 };
 
-struct TimeUniform {
+struct SimulationUniform {
   time: f32,
   amplitude: f32,
   frequency: f32,
   speed: f32,
+  particle_count: u32,
+  workgroups_per_row: u32,
+  _padding0: vec2<u32>,
 };
 
 @group(0) @binding(0)
 var<storage, read_write> instances: InstanceBuffer;
 
 @group(0) @binding(1)
-var<uniform> simulation: TimeUniform;
+var<uniform> simulation: SimulationUniform;
 
 @compute
-@workgroup_size(64, 1, 1)
+@workgroup_size(64)
 fn main(
-  @builtin(global_invocation_id) global_invocation_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(local_invocation_id) local_invocation_id: vec3<u32>,
 ) {
-  let index = global_invocation_id.x;
-  let total = arrayLength(&instances.values);
+  let linear_group_index =
+    workgroup_id.y * simulation.workgroups_per_row + workgroup_id.x;
+  let index: u32 = linear_group_index * 64u + local_invocation_id.x;
 
-  if (index >= total) { return; }
+  if (index >= simulation.particle_count) {
+    return;
+  }
 
   let translation = instances.values[index].translation.xyz;
 
