@@ -13,11 +13,11 @@ use winit::{
     window::Window,
 };
 
-const NUM_INSTANCES: u32 = 4_000_000;
+const NUM_INSTANCES: u32 = 3_000_000;
 // const DELTA_TIME: f32 = 0.016;
 const DELTA_TIME: f32 = 0.0016 * 0.5;
 // const GRAVITY: f32 = 2.0;
-const GRAVITY: f32 = 9.18;
+const GRAVITY: f32 = 6.672 * 4.0;
 
 pub struct App {
     pipeline: Option<Pipeline>,
