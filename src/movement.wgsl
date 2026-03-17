@@ -100,7 +100,8 @@ fn main(
       sin(translation.x * simulation.frequency + simulation.time * simulation.speed) +
       sin(translation.z * simulation.frequency + simulation.time * simulation.speed);
 
-  instance.translation.y = wave * simulation.amplitude;
+  //instance.translation.y = wave * simulation.amplitude;
+  instance.translation.y = instance.translation.y;
   instances.values[index] = instance;
   
   let particle_radius = 0.02;

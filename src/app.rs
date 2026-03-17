@@ -16,12 +16,12 @@ use winit::{
 const NUM_INSTANCES: u32 = 5_000_000;
 
 pub struct App {
-    state: Option<Pipeline>,
+    pipeline: Option<Pipeline>,
 }
 
 impl App {
     pub fn new() -> Self {
-        Self { state: None }
+        Self { pipeline: None }
     }
 
     pub fn run() -> anyhow::Result<()> {
@@ -43,21 +43,21 @@ impl ApplicationHandler<Pipeline> for App {
                 .unwrap(),
         );
 
-        let mut state = pollster::block_on(Pipeline::new(window)).unwrap();
+        let mut pipeline = pollster::block_on(Pipeline::new(window)).unwrap();
 
-        let size = state.renderer.window.inner_size();
-        state
+        let size = pipeline.renderer.window.inner_size();
+        pipeline
             .renderer
-            .resize(size.width, size.height, &state.device);
-        state.renderer.window.request_redraw();
+            .resize(size.width, size.height, &pipeline.shared.device);
+        pipeline.renderer.window.request_redraw();
 
-        self.state = Some(state);
+        self.pipeline = Some(pipeline);
     }
 
     #[allow(unused_mut)]
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: Pipeline) {
         // This is where proxy.send_event() ends up
-        self.state = Some(event);
+        self.pipeline = Some(event);
     }
 
     fn window_event(
@@ -66,16 +66,16 @@ impl ApplicationHandler<Pipeline> for App {
         _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        let state = match &mut self.state {
+        let pipeline = match &mut self.pipeline {
             Some(canvas) => canvas,
             None => return,
         };
 
         match event {
             WindowEvent::Resized(size) => {
-                state
+                pipeline
                     .renderer
-                    .resize(size.width, size.height, &state.device);
+                    .resize(size.width, size.height, &pipeline.shared.device);
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -85,35 +85,40 @@ impl ApplicationHandler<Pipeline> for App {
                         ..
                     },
                 ..
-            } => state.renderer.handle_key(
+            } => pipeline.renderer.handle_key(
                 event_loop,
                 code,
                 key_state.is_pressed(),
-                &mut state.camera_controller,
+                &mut pipeline.camera_controller,
             ),
             WindowEvent::RedrawRequested => {
-                state.camera_controller.update_camera(&mut state.camera);
+                pipeline
+                    .camera_controller
+                    .update_camera(&mut pipeline.camera);
 
-                //state.movement.update();
-                let _ = state.movement.update(&state.device, &state.queue);
-                state.renderer.update(
-                    &state.queue,
-                    &mut state.camera,
-                    &mut state.camera_uniform,
-                    &state.camera_buffer,
-                    &state.camera_controller,
+                //pipeline.movement.update();
+                let _ = pipeline
+                    .movement
+                    .update(&pipeline.shared.device, &pipeline.shared.queue);
+                pipeline.renderer.update(
+                    &pipeline.shared.queue,
+                    &mut pipeline.camera,
+                    &mut pipeline.camera_uniform,
+                    &pipeline.camera_buffer,
+                    &pipeline.camera_controller,
                 );
-                match state
-                    .renderer
-                    .render(&state.device, &state.queue, &state.camera_bind_group)
-                {
+                match pipeline.renderer.render(
+                    &pipeline.shared.device,
+                    &pipeline.shared.queue,
+                    &pipeline.camera_bind_group,
+                ) {
                     Ok(_) => {}
                     // Reconfigure the surface if it's lost or outdated
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                        let size = state.renderer.window.inner_size();
-                        state
+                        let size = pipeline.renderer.window.inner_size();
+                        pipeline
                             .renderer
-                            .resize(size.width, size.height, &state.device);
+                            .resize(size.width, size.height, &pipeline.shared.device);
                     }
                     Err(e) => {
                         log::error!("Unable to render {}", e);
@@ -126,12 +131,7 @@ impl ApplicationHandler<Pipeline> for App {
 }
 
 pub struct Pipeline {
-    //instance,
-    //adapter,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    #[allow(unused)]
-    instances: wgpu::Buffer,
+    shared: Shared,
 
     camera: Camera,
     camera_controller: CameraController,
@@ -145,36 +145,7 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..Default::default()
-        });
-
-        let surface = instance.create_surface(window.clone()).unwrap();
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await?;
-
-        let adapter_limits = adapter.limits();
-        println!("limits: {adapter_limits:#?}\n");
-        //let mut required_limits = wgpu::Limits::default();
-        //required_limits.max_buffer_size = adapter_limits.max_buffer_size;
-        //println!("limits: {required_limits:#?}");
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::empty(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                required_limits: adapter_limits,
-                memory_hints: Default::default(),
-                trace: wgpu::Trace::Off,
-            })
-            .await?;
+        let (shared, surface) = Shared::new(window.clone()).await.unwrap();
 
         let instances = {
             let instances = (0..NUM_INSTANCES)
@@ -215,14 +186,16 @@ impl Pipeline {
                 })
                 .collect::<Vec<_>>();
             let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Instance Buffer"),
-                contents: bytemuck::cast_slice(&instance_data),
-                usage: wgpu::BufferUsages::VERTEX
-                    | wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC
-                    | wgpu::BufferUsages::COPY_DST,
-            })
+            shared
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Instance Buffer"),
+                    contents: bytemuck::cast_slice(&instance_data),
+                    usage: wgpu::BufferUsages::VERTEX
+                        | wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::COPY_DST,
+                })
         };
 
         let camera = Camera {
@@ -242,27 +215,31 @@ impl Pipeline {
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update_view_proj(&camera);
 
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Camera Buffer"),
-            contents: bytemuck::cast_slice(&[camera_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-                label: Some("camera_bind_group_layout"),
+        let camera_buffer = shared
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Camera Buffer"),
+                contents: bytemuck::cast_slice(&[camera_uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
+        let camera_bind_group_layout =
+            shared
+                .device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                    label: Some("camera_bind_group_layout"),
+                });
 
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let camera_bind_group = shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -271,16 +248,18 @@ impl Pipeline {
             label: Some("camera_bind_group"),
         });
 
-        let movement = Movement::new(&device, &queue, &instances, &camera_buffer)
+        let movement = Movement::new(&shared.device, &shared.queue, &instances, &camera_buffer)
             .await
             .unwrap();
         let renderer = Renderer::new(
             window,
             surface,
-            &instance,
-            &adapter,
-            &device,
-            &queue,
+            //
+            &shared.instance,
+            &shared.adapter,
+            &shared.device,
+            &shared.queue,
+            //
             &camera_bind_group_layout,
             &movement.visible_instances,
             &movement.indirect_buffer,
@@ -289,19 +268,68 @@ impl Pipeline {
         .unwrap();
 
         Ok(Self {
+            shared,
             renderer,
             movement,
-            device,
 
             camera,
             camera_controller,
             camera_uniform,
             camera_buffer,
             camera_bind_group,
-
-            queue,
-            instances,
         })
+    }
+}
+
+pub struct Shared {
+    instance: wgpu::Instance,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    adapter: wgpu::Adapter,
+}
+
+impl Shared {
+    pub async fn new(window: Arc<Window>) -> anyhow::Result<(Self, wgpu::Surface<'static>)> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..Default::default()
+        });
+
+        let surface = instance.create_surface(window.clone()).unwrap();
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await?;
+
+        let adapter_limits = adapter.limits();
+        println!("limits: {adapter_limits:#?}\n");
+        //let mut required_limits = wgpu::Limits::default();
+        //required_limits.max_buffer_size = adapter_limits.max_buffer_size;
+        //println!("limits: {required_limits:#?}");
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: None,
+                required_features: wgpu::Features::empty(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                required_limits: adapter_limits,
+                memory_hints: Default::default(),
+                trace: wgpu::Trace::Off,
+            })
+            .await?;
+
+        Ok((
+            Self {
+                instance,
+                device,
+                queue,
+                adapter,
+            },
+            surface,
+        ))
     }
 }
 
