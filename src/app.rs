@@ -50,7 +50,9 @@ impl ApplicationHandler<Pipeline> for App {
         let mut state = pollster::block_on(Pipeline::new(window)).unwrap();
 
         let size = state.renderer.window.inner_size();
-        state.renderer.resize(size.width, size.height);
+        state
+            .renderer
+            .resize(size.width, size.height, &state.device);
         state.renderer.window.request_redraw();
 
         self.state = Some(state);
@@ -75,7 +77,9 @@ impl ApplicationHandler<Pipeline> for App {
 
         match event {
             WindowEvent::Resized(size) => {
-                state.renderer.resize(size.width, size.height);
+                state
+                    .renderer
+                    .resize(size.width, size.height, &state.device);
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -90,16 +94,20 @@ impl ApplicationHandler<Pipeline> for App {
                 .handle_key(event_loop, code, key_state.is_pressed()),
             WindowEvent::RedrawRequested => {
                 //state.movement.update();
-                if let Err(error) = pollster::block_on(state.movement.update()) {
+                if let Err(error) =
+                    pollster::block_on(state.movement.update(&state.device, &state.queue))
+                {
                     log::error!("Movement update failed: {}", error);
                 }
-                state.renderer.update();
-                match state.renderer.render() {
+                state.renderer.update(&state.queue);
+                match state.renderer.render(&state.device, &state.queue) {
                     Ok(_) => {}
                     // Reconfigure the surface if it's lost or outdated
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                         let size = state.renderer.window.inner_size();
-                        state.renderer.resize(size.width, size.height);
+                        state
+                            .renderer
+                            .resize(size.width, size.height, &state.device);
                     }
                     Err(e) => {
                         log::error!("Unable to render {}", e);
@@ -112,42 +120,17 @@ impl ApplicationHandler<Pipeline> for App {
 }
 
 pub struct Pipeline {
+    //instance,
+    //adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+
     renderer: Renderer,
     movement: Movement,
 }
 
 impl Pipeline {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
-        let movement = Movement::new().await.unwrap();
-        let renderer = Renderer::new(window).await.unwrap();
-        Ok(Self { renderer, movement })
-    }
-}
-
-pub struct Renderer {
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    is_surface_configured: bool,
-    render_pipeline: wgpu::RenderPipeline,
-    window: Arc<Window>,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    num_indices: u32,
-    camera: Camera,
-    camera_controller: CameraController,
-    camera_uniform: CameraUniform,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    instances: Vec<Instance>,
-    instance_buffer: wgpu::Buffer,
-    depth: Texture,
-}
-
-impl Renderer {
-    pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
-        let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..Default::default()
@@ -173,6 +156,49 @@ impl Renderer {
                 trace: wgpu::Trace::Off,
             })
             .await?;
+
+        let movement = Movement::new(&device, &queue).await.unwrap();
+        let renderer = Renderer::new(window, surface, &instance, &adapter, &device, &queue)
+            .await
+            .unwrap();
+        Ok(Self {
+            renderer,
+            movement,
+            device,
+            queue,
+        })
+    }
+}
+
+pub struct Renderer {
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    is_surface_configured: bool,
+    render_pipeline: wgpu::RenderPipeline,
+    window: Arc<Window>,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    num_indices: u32,
+    camera: Camera,
+    camera_controller: CameraController,
+    camera_uniform: CameraUniform,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+    instances: Vec<Instance>,
+    instance_buffer: wgpu::Buffer,
+    depth: Texture,
+}
+
+impl Renderer {
+    pub async fn new(
+        window: Arc<Window>,
+        surface: wgpu::Surface<'static>,
+        instance: &wgpu::Instance,
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> anyhow::Result<Self> {
+        let size = window.inner_size();
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
@@ -356,8 +382,6 @@ impl Renderer {
 
         Ok(Self {
             surface,
-            device,
-            queue,
             config,
             is_surface_configured: false,
             render_pipeline,
@@ -376,17 +400,21 @@ impl Renderer {
         })
     }
 
-    fn resize(&mut self, width: u32, height: u32) {
+    fn resize(&mut self, width: u32, height: u32, device: &wgpu::Device) {
         if width > 0 && height > 0 {
             self.config.width = width;
             self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
+            self.surface.configure(device, &self.config);
             self.is_surface_configured = true;
-            self.depth = Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
+            self.depth = Texture::create_depth_texture(device, &self.config, "depth_texture");
         }
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    fn render(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), wgpu::SurfaceError> {
         self.window.request_redraw();
 
         // We can't render unless the surface is configured
@@ -399,11 +427,9 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Render Encoder"),
+        });
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -450,16 +476,16 @@ impl Renderer {
         }
 
         // submit will accept anything that implements IntoIter
-        self.queue.submit(std::iter::once(encoder.finish()));
+        queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())
     }
 
-    fn update(&mut self) {
+    fn update(&mut self, queue: &wgpu::Queue) {
         self.camera_controller.update_camera(&mut self.camera);
         self.camera_uniform.update_view_proj(&self.camera);
-        self.queue.write_buffer(
+        queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
@@ -485,18 +511,12 @@ pub struct Movement {
     bind_group: wgpu::BindGroup,
     sender: flume::Sender<Vec<u32>>,
     receiver: flume::Receiver<Vec<u32>>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
 }
 
 impl Movement {
-    pub async fn new() -> anyhow::Result<Self> {
+    pub async fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<Self> {
         //let input_data: Vec<f32> = vec![0.0; 100];
         let input_data: Vec<f32> = (0..100).map(|index| index as f32).collect();
-
-        let instance = wgpu::Instance::new(&Default::default());
-        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-        let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("movement.wgsl"));
 
@@ -548,9 +568,6 @@ impl Movement {
 
         Ok(Self {
             pipeline,
-            device,
-            queue,
-
             input_data,
             input_buffer,
             output_buffer,
@@ -561,8 +578,8 @@ impl Movement {
         })
     }
 
-    async fn update(&mut self) -> anyhow::Result<()> {
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+    async fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<()> {
+        let mut encoder = device.create_command_encoder(&Default::default());
 
         {
             // We specified 64 threads per workgroup in the shader, so we need to compute how many
@@ -583,7 +600,7 @@ impl Movement {
             self.output_buffer.size(),
         );
 
-        self.queue.submit([encoder.finish()]);
+        queue.submit([encoder.finish()]);
 
         {
             // The mapping process is async, so we'll need to create a channel to get
@@ -598,7 +615,7 @@ impl Movement {
 
             // The callback we submitted to map async will only get called after the
             // device is polled or the queue submitted
-            self.device.poll(wgpu::PollType::wait_indefinitely())?;
+            device.poll(wgpu::PollType::wait_indefinitely())?;
 
             // We check if the mapping was successful here
             rx.recv_async().await??;
