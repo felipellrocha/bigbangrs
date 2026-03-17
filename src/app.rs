@@ -2,6 +2,7 @@ use crate::texture::Texture;
 use cgmath::prelude::*;
 //use flume::bounded;
 use std::sync::Arc;
+use std::time::Instant;
 use wgpu::util::DeviceExt;
 
 use winit::{
@@ -514,6 +515,7 @@ pub struct Movement {
     bind_group: wgpu::BindGroup,
     #[allow(unused)]
     instances: wgpu::Buffer,
+    start_time: Instant,
 }
 
 impl Movement {
@@ -597,6 +599,7 @@ impl Movement {
             bind_group,
             time_buffer,
             instances: instances.clone(),
+            start_time: Instant::now(),
         })
     }
 
@@ -604,8 +607,9 @@ impl Movement {
         let mut encoder = device.create_command_encoder(&Default::default());
 
         {
+            let elapsed_seconds = self.start_time.elapsed().as_secs_f32();
             let uniform = TimeUniform {
-                time: 1.0,
+                time: elapsed_seconds,
                 amplitude: 1.0,
                 frequency: 0.75,
                 speed: 1.5,
