@@ -94,6 +94,37 @@ fn world_to_voxel_position(world_position: vec3<f32>) -> vec3<f32> {
   );
 }
 
+fn wrap_world_position(world_position: vec3<f32>) -> vec3<f32> {
+  let world_minimum = volume_grid.world_min.xyz;
+  let world_maximum = volume_grid.world_max.xyz;
+  let world_size = world_maximum - world_minimum;
+
+  var wrapped_position = world_position;
+
+  if (wrapped_position.x < world_minimum.x) {
+    wrapped_position.x = wrapped_position.x + world_size.x;
+  }
+  if (wrapped_position.x > world_maximum.x) {
+    wrapped_position.x = wrapped_position.x - world_size.x;
+  }
+
+  if (wrapped_position.y < world_minimum.y) {
+    wrapped_position.y = wrapped_position.y + world_size.y;
+  }
+  if (wrapped_position.y > world_maximum.y) {
+    wrapped_position.y = wrapped_position.y - world_size.y;
+  }
+
+  if (wrapped_position.z < world_minimum.z) {
+    wrapped_position.z = wrapped_position.z + world_size.z;
+  }
+  if (wrapped_position.z > world_maximum.z) {
+    wrapped_position.z = wrapped_position.z - world_size.z;
+  }
+
+  return wrapped_position;
+}
+
 fn read_voxel_scalar(x: u32, y: u32, z: u32) -> f32 {
   let voxel_index = flatten_voxel_index(x, y, z);
   return f32(voxel_values_in[voxel_index]) / volume_grid.fixed_point_scale;
@@ -109,6 +140,7 @@ fn sample_field_nearest(world_position: vec3<f32>) -> f32 {
   return read_voxel_scalar(voxel_x, voxel_y, voxel_z);
 }
 
+/*
 fn sample_field_gradient(world_position: vec3<f32>) -> vec3<f32> {
   let voxel_position = world_to_voxel_position(world_position);
 
@@ -138,6 +170,51 @@ fn sample_field_gradient(world_position: vec3<f32>) -> vec3<f32> {
     sample_x_positive - sample_x_negative,
     sample_y_positive - sample_y_negative,
     sample_z_positive - sample_z_negative,
+  );
+}
+*/
+
+fn sample_field_gradient(world_position: vec3<f32>) -> vec3<f32> {
+  let voxel_position = world_to_voxel_position(world_position);
+
+  let center_x = u32(round(voxel_position.x));
+  let center_y = u32(round(voxel_position.y));
+  let center_z = u32(round(voxel_position.z));
+
+  let min_x = max(center_x, 1u) - 1u;
+  let max_x = min(center_x + 1u, volume_grid.width - 1u);
+
+  let min_y = max(center_y, 1u) - 1u;
+  let max_y = min(center_y + 1u, volume_grid.height - 1u);
+
+  let min_z = max(center_z, 1u) - 1u;
+  let max_z = min(center_z + 1u, volume_grid.depth - 1u);
+
+  let sample_x_negative = read_voxel_scalar(min_x, center_y, center_z);
+  let sample_x_positive = read_voxel_scalar(max_x, center_y, center_z);
+
+  let sample_y_negative = read_voxel_scalar(center_x, min_y, center_z);
+  let sample_y_positive = read_voxel_scalar(center_x, max_y, center_z);
+
+  let sample_z_negative = read_voxel_scalar(center_x, center_y, min_z);
+  let sample_z_positive = read_voxel_scalar(center_x, center_y, max_z);
+
+  // CHANGED: compute voxel cell size in world-space units.
+  let world_minimum = volume_grid.world_min.xyz;
+  let world_maximum = volume_grid.world_max.xyz;
+  let world_size = world_maximum - world_minimum;
+
+  let cell_size = vec3<f32>(
+    world_size.x / f32(volume_grid.width),
+    world_size.y / f32(volume_grid.height),
+    world_size.z / f32(volume_grid.depth),
+  );
+
+  // CHANGED: central difference divided by physical spacing.
+  return vec3<f32>(
+    (sample_x_positive - sample_x_negative) / max(cell_size.x * 2.0, 0.000001),
+    (sample_y_positive - sample_y_negative) / max(cell_size.y * 2.0, 0.000001),
+    (sample_z_positive - sample_z_negative) / max(cell_size.z * 2.0, 0.000001),
   );
 }
 
@@ -186,6 +263,7 @@ fn main(
   var particle_force = instance.force.xyz;
   var particle_position = instance.translation.xyz;
 
+  /*
   let field_value = sample_field_nearest(particle_position);
   let field_gradient = sample_field_gradient(particle_position);
   var gravity = vec3<f32>(0.0);
@@ -196,11 +274,16 @@ fn main(
     // CHANGED: use field magnitude * gradient direction as acceleration.
     gravity = downhill_direction * field_value * simulation.gravity_strength;
   }
+  */
+
+  let field_gradient = sample_field_gradient(particle_position);
+  let gravity = field_gradient * simulation.gravity_strength;
+
   particle_force = particle_force + gravity * simulation.delta_time;
   particle_position = particle_position + particle_force * simulation.delta_time;
   let world_minimum = volume_grid.world_min.xyz;
   let world_maximum = volume_grid.world_max.xyz;
-  particle_position = clamp(particle_position, world_minimum, world_maximum);
+  particle_position = wrap_world_position(particle_position);
 
   //let translation = instance.translation.xyz;
 
