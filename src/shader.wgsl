@@ -1,7 +1,12 @@
 struct CameraUniform {
   view_proj: mat4x4<f32>,
+  view: mat4x4<f32>,
   right: vec4<f32>,
   up: vec4<f32>,
+  eye: vec4<f32>,
+  znear: f32,
+  zfar: f32,
+  _padding: vec2<f32>,
 };
 @group(0) @binding(0) // 1.
 var<uniform> camera: CameraUniform;
@@ -18,7 +23,7 @@ struct InstanceInput {
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
-  @location(0) color: vec3<f32>,
+  @location(0) brightness: f32,
 }
 
 @vertex
@@ -27,8 +32,8 @@ fn clip_space(
   instance: InstanceInput,
 ) -> VertexOutput {
   var out: VertexOutput;
-  out.color = instance.color.rgb;
   /*
+  out.color = instance.color.rgb;
   let model_matrix = mat4x4<f32>(
     instance.model_matrix_0,
     instance.model_matrix_1,
@@ -37,15 +42,30 @@ fn clip_space(
   );
   out.position = camera.view_proj * model_matrix * model.position;
   */
-  let billboard = camera.right.xyz * model.position.x + camera.up.xyz * model.position.y;
-  //let world_position = instance.translation.xyz + model.position.xyz + billboard;
-  let world_position = instance.translation.xyz + billboard;
 
+  let billboard = camera.right.xyz * model.position.x + camera.up.xyz * model.position.y;
+  let world_position = instance.translation.xyz + billboard;
+  let view_position = camera.view * vec4<f32>(world_position, 1.0);
+  let depth = -view_position.z;
+
+  let normalized_depth = clamp(
+    (depth - camera.znear) / (camera.zfar - camera.znear),
+    0.0,
+    1.0
+  );
+  let brightness = 1.0 - normalized_depth;
+
+  out.brightness = brightness * brightness;
   out.position = camera.view_proj * vec4<f32>(world_position.xyz, 1.0);
   return out;
 }
 
 @fragment
 fn paint(in: VertexOutput) -> @location(0) vec4<f32> {
-  return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+  return vec4<f32>(
+    in.brightness,
+    in.brightness,
+    in.brightness,
+    1.0,
+  );
 }

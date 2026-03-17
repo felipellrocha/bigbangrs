@@ -13,7 +13,7 @@ use winit::{
     window::Window,
 };
 
-const NUM_INSTANCES: u32 = 1_000_000;
+const NUM_INSTANCES: u32 = 2_000_000;
 
 pub struct App {
     state: Option<Pipeline>,
@@ -787,8 +787,13 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_co
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    view: [[f32; 4]; 4],
     right: [f32; 4],
     up: [f32; 4],
+    eye: [f32; 4],
+    znear: f32,
+    zfar: f32,
+    _padding: [f32; 2], // alignment (important!)
 }
 
 impl CameraUniform {
@@ -796,8 +801,13 @@ impl CameraUniform {
         use cgmath::SquareMatrix;
         Self {
             view_proj: cgmath::Matrix4::identity().into(),
+            view: cgmath::Matrix4::identity().into(),
             right: [1.0, 0.0, 0.0, 0.0],
             up: [0.0, 1.0, 0.0, 0.0],
+            eye: [0.0, 0.0, 0.0, 0.0],
+            znear: 0.1,
+            zfar: 100.0,
+            _padding: [0.0, 0.0],
         }
     }
 
@@ -805,13 +815,18 @@ impl CameraUniform {
         use cgmath::InnerSpace;
 
         self.view_proj = camera.build_view_projection_matrix().into();
+        let view = cgmath::Matrix4::look_at_rh(camera.eye, camera.target, camera.up);
 
         let forward = (camera.target - camera.eye).normalize();
         let right = forward.cross(camera.up).normalize();
         let up = right.cross(forward).normalize();
 
+        self.view = view.into();
         self.right = [right.x, right.y, right.z, 0.0];
         self.up = [up.x, up.y, up.z, 0.0];
+        self.eye = [camera.eye.x, camera.eye.y, camera.eye.z, 1.0];
+        self.znear = camera.znear;
+        self.zfar = camera.zfar;
     }
 }
 
