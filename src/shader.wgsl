@@ -10,14 +10,12 @@ struct VertexInput {
 
 struct InstanceInput {
     @location(2) color: vec4<f32>,
-    @location(5) model_matrix_0: vec4<f32>,
-    @location(6) model_matrix_1: vec4<f32>,
-    @location(7) model_matrix_2: vec4<f32>,
-    @location(8) model_matrix_3: vec4<f32>,
+    @location(3) translation: vec4<f32>,
+    @location(4) rotation: vec4<f32>,
 };
 
 struct VertexOutput {
-  @builtin(position) clip_position: vec4<f32>,
+  @builtin(position) position: vec4<f32>,
   @location(0) color: vec3<f32>,
 }
 
@@ -28,13 +26,16 @@ fn clip_space(
 ) -> VertexOutput {
   var out: VertexOutput;
   out.color = instance.color.rgb;
+  /*
   let model_matrix = mat4x4<f32>(
     instance.model_matrix_0,
     instance.model_matrix_1,
     instance.model_matrix_2,
     instance.model_matrix_3,
   );
-  out.clip_position = camera.view_proj * model_matrix * vec4<f32>(model.position, 1.0);
+  out.position = camera.view_proj * model_matrix * model.position;
+  */
+  out.position = camera.view_proj * vec4<f32>(instance.translation.xyz + model.position.xyz, 1.0);
   return out;
 }
 

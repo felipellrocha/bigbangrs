@@ -1,6 +1,6 @@
 use crate::texture::Texture;
 use cgmath::prelude::*;
-use flume::bounded;
+//use flume::bounded;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
@@ -12,12 +12,7 @@ use winit::{
     window::Window,
 };
 
-const NUM_INSTANCES_PER_ROW: u32 = 10;
-const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(
-    NUM_INSTANCES_PER_ROW as f32 * 0.5,
-    0.0,
-    NUM_INSTANCES_PER_ROW as f32 * 0.5,
-);
+const NUM_INSTANCES: u32 = 10_000;
 
 pub struct App {
     state: Option<Pipeline>,
@@ -124,6 +119,8 @@ pub struct Pipeline {
     //adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    #[allow(unused)]
+    instances: wgpu::Buffer,
 
     renderer: Renderer,
     movement: Movement,
@@ -157,15 +154,68 @@ impl Pipeline {
             })
             .await?;
 
-        let movement = Movement::new(&device, &queue).await.unwrap();
-        let renderer = Renderer::new(window, surface, &instance, &adapter, &device, &queue)
-            .await
-            .unwrap();
+        let instances = {
+            let instances = (0..NUM_INSTANCES)
+                .map(|_| {
+                    use rand::RngExt;
+                    let mut random_generator = rand::rng();
+
+                    let x: f32 = random_generator.random_range(-100.0..=100.0);
+                    let y: f32 = random_generator.random_range(-100.0..=100.0);
+                    let z: f32 = random_generator.random_range(-100.0..=100.0);
+                    let w: f32 = 1.0;
+                    let translation = cgmath::Vector4 { x, y, z, w };
+
+                    let rotation = if translation.is_zero() {
+                        // this is needed so an object at (0, 0, 0) won't get scaled to zero
+                        // as Quaternions can affect scale if they're not created correctly
+                        cgmath::Quaternion::from_axis_angle(
+                            cgmath::Vector3::unit_z(),
+                            cgmath::Deg(0.0),
+                        )
+                    } else {
+                        cgmath::Quaternion::from_axis_angle(
+                            translation.truncate().normalize(),
+                            cgmath::Deg(45.0),
+                        )
+                    };
+                    let r: f32 = random_generator.random();
+                    let g: f32 = random_generator.random();
+                    let b: f32 = random_generator.random();
+
+                    let color = [r, g, b, 1.0];
+
+                    Instance {
+                        translation,
+                        rotation,
+                        color,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Instance Buffer"),
+                contents: bytemuck::cast_slice(&instance_data),
+                usage: wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            })
+        };
+
+        let movement = Movement::new(&device, &queue, &instances).await.unwrap();
+        let renderer = Renderer::new(
+            window, surface, &instance, &adapter, &device, &queue, &instances,
+        )
+        .await
+        .unwrap();
+
         Ok(Self {
             renderer,
             movement,
             device,
             queue,
+            instances,
         })
     }
 }
@@ -178,14 +228,13 @@ pub struct Renderer {
     window: Arc<Window>,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
+    instances: wgpu::Buffer,
     num_indices: u32,
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    instances: Vec<Instance>,
-    instance_buffer: wgpu::Buffer,
     depth: Texture,
 }
 
@@ -193,10 +242,11 @@ impl Renderer {
     pub async fn new(
         window: Arc<Window>,
         surface: wgpu::Surface<'static>,
-        instance: &wgpu::Instance,
+        _instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _queue: &wgpu::Queue,
+        instances: &wgpu::Buffer,
     ) -> anyhow::Result<Self> {
         let size = window.inner_size();
 
@@ -335,49 +385,6 @@ impl Renderer {
         });
         let num_indices = INDICES.len() as u32;
 
-        let instances = (0..NUM_INSTANCES_PER_ROW)
-            .flat_map(|z| {
-                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                    let position = cgmath::Vector3 {
-                        x: x as f32,
-                        y: 0.0,
-                        z: z as f32,
-                    } - INSTANCE_DISPLACEMENT;
-
-                    let rotation = if position.is_zero() {
-                        // this is needed so an object at (0, 0, 0) won't get scaled to zero
-                        // as Quaternions can affect scale if they're not created correctly
-                        cgmath::Quaternion::from_axis_angle(
-                            cgmath::Vector3::unit_z(),
-                            cgmath::Deg(0.0),
-                        )
-                    } else {
-                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
-                    };
-                    use rand::RngExt;
-
-                    let mut random_generator = rand::rng();
-                    let r: f32 = random_generator.random();
-                    let g: f32 = random_generator.random();
-                    let b: f32 = random_generator.random();
-
-                    let color = [r, g, b, 1.0];
-
-                    Instance {
-                        position,
-                        rotation,
-                        color,
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Instance Buffer"),
-            contents: bytemuck::cast_slice(&instance_data),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
         let depth = Texture::create_depth_texture(&device, &config, "depth_texture");
 
         Ok(Self {
@@ -388,14 +395,13 @@ impl Renderer {
             window,
             vertex_buffer,
             index_buffer,
+            instances: instances.clone(),
             num_indices,
             camera,
             camera_controller,
             camera_uniform,
             camera_buffer,
             camera_bind_group,
-            instances,
-            instance_buffer,
             depth,
         })
     }
@@ -468,10 +474,10 @@ impl Renderer {
                 render_pass.set_pipeline(&self.render_pipeline);
                 render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                render_pass.set_vertex_buffer(1, self.instances.slice(..));
                 render_pass
                     .set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
+                render_pass.draw_indexed(0..self.num_indices, 0, 0..NUM_INSTANCES as _);
             }
         }
 
@@ -504,77 +510,93 @@ impl Renderer {
 
 pub struct Movement {
     pipeline: wgpu::ComputePipeline,
-    input_data: Vec<f32>,
-    input_buffer: wgpu::Buffer,
-    output_buffer: wgpu::Buffer,
-    read_buffer: wgpu::Buffer,
+    time_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    sender: flume::Sender<Vec<u32>>,
-    receiver: flume::Receiver<Vec<u32>>,
+    #[allow(unused)]
+    instances: wgpu::Buffer,
 }
 
 impl Movement {
-    pub async fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<Self> {
-        //let input_data: Vec<f32> = vec![0.0; 100];
-        let input_data: Vec<f32> = (0..100).map(|index| index as f32).collect();
-
+    pub async fn new(
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        instances: &wgpu::Buffer,
+    ) -> anyhow::Result<Self> {
         let shader = device.create_shader_module(wgpu::include_wgsl!("movement.wgsl"));
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Introduction Compute Pipeline"),
-            layout: None,
-            module: &shader,
-            entry_point: None,
-            compilation_options: Default::default(),
-            cache: Default::default(),
+        let time_uniform = TimeUniform {
+            time: 0.0,
+            amplitude: 1.0,
+            frequency: 0.75,
+            speed: 1.0,
+        };
+        let time_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Time Buffer"),
+            contents: bytemuck::bytes_of(&time_uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("input"),
-            contents: bytemuck::cast_slice(&input_data),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
-        });
-
-        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("output"),
-            size: input_buffer.size(),
-            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        let read_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("read"),
-            size: input_buffer.size(),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &pipeline.get_bind_group_layout(0),
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Movement Bind Group Layout"),
             entries: &[
-                wgpu::BindGroupEntry {
+                wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    resource: input_buffer.as_entire_binding(),
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                wgpu::BindGroupEntry {
+                wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    resource: output_buffer.as_entire_binding(),
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
             ],
         });
 
-        let (sender, receiver) = bounded(1);
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Movement Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: instances.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: time_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Movement Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Introduction Compute Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: Default::default(),
+        });
 
         Ok(Self {
             pipeline,
-            input_data,
-            input_buffer,
-            output_buffer,
-            read_buffer,
             bind_group,
-            sender,
-            receiver,
+            time_buffer,
+            instances: instances.clone(),
         })
     }
 
@@ -582,9 +604,20 @@ impl Movement {
         let mut encoder = device.create_command_encoder(&Default::default());
 
         {
+            let uniform = TimeUniform {
+                time: 1.0,
+                amplitude: 1.0,
+                frequency: 0.75,
+                speed: 1.5,
+            };
+
+            queue.write_buffer(&self.time_buffer, 0, bytemuck::bytes_of(&uniform));
+        }
+
+        {
             // We specified 64 threads per workgroup in the shader, so we need to compute how many
             // workgroups we need to dispatch.
-            let num_dispatches = self.input_data.len().div_ceil(64) as u32;
+            let num_dispatches = NUM_INSTANCES.div_ceil(64);
 
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&self.pipeline);
@@ -592,47 +625,7 @@ impl Movement {
             pass.dispatch_workgroups(num_dispatches, 1, 1);
         }
 
-        encoder.copy_buffer_to_buffer(
-            &self.output_buffer,
-            0,
-            &self.read_buffer,
-            0,
-            self.output_buffer.size(),
-        );
-
         queue.submit([encoder.finish()]);
-
-        {
-            // The mapping process is async, so we'll need to create a channel to get
-            // the success flag for our mapping
-            let (tx, rx) = bounded(1);
-
-            // We send the success or failure of our mapping via a callback
-            self.read_buffer
-                .map_async(wgpu::MapMode::Read, .., move |result| {
-                    tx.send(result).unwrap()
-                });
-
-            // The callback we submitted to map async will only get called after the
-            // device is polled or the queue submitted
-            device.poll(wgpu::PollType::wait_indefinitely())?;
-
-            // We check if the mapping was successful here
-            rx.recv_async().await??;
-
-            // We then get the bytes that were stored in the buffer
-            let output_data = self.read_buffer.get_mapped_range(..);
-
-            // Now we have the data on the CPU we can do what ever we want to with it
-            //assert_eq!(&self.input_data, bytemuck::cast_slice(&output_data));
-            println!(
-                "output: {:?}",
-                bytemuck::cast_slice::<u8, u32>(&output_data)
-            );
-        }
-
-        // We need to unmap the buffer to be able to use it again
-        self.read_buffer.unmap();
 
         Ok(())
     }
@@ -641,28 +634,28 @@ impl Movement {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
-    position: [f32; 3],
+    translation: [f32; 4],
     //color: [f32; 3],
 }
 const VERTICES: &[Vertex] = &[
     Vertex {
-        position: [-0.0868241, 0.49240386, 0.0],
+        translation: [-0.0868241, 0.49240386, 0.0, 1.0],
         //color: [0.5, 0.0, 0.5],
     }, // A
     Vertex {
-        position: [-0.49513406, 0.06958647, 0.0],
+        translation: [-0.49513406, 0.06958647, 0.0, 1.0],
         //color: [0.5, 0.0, 0.5],
     }, // B
     Vertex {
-        position: [-0.21918549, -0.44939706, 0.0],
+        translation: [-0.21918549, -0.44939706, 0.0, 1.0],
         //color: [0.5, 0.0, 0.5],
     }, // C
     Vertex {
-        position: [0.35966998, -0.3473291, 0.0],
+        translation: [0.35966998, -0.3473291, 0.0, 1.0],
         //color: [0.5, 0.0, 0.5],
     }, // D
     Vertex {
-        position: [0.44147372, 0.2347359, 0.0],
+        translation: [0.44147372, 0.2347359, 0.0, 1.0],
         //color: [0.5, 0.0, 0.5],
     }, // E
 ];
@@ -681,7 +674,7 @@ impl Vertex {
                 wgpu::VertexAttribute {
                     offset: 0,
                     shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: wgpu::VertexFormat::Float32x4,
                 },
                 //wgpu::VertexAttribute {
                 //    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
@@ -815,7 +808,7 @@ impl CameraUniform {
 
 struct Instance {
     color: [f32; 4],
-    position: cgmath::Vector3<f32>,
+    translation: cgmath::Vector4<f32>,
     rotation: cgmath::Quaternion<f32>,
 }
 
@@ -823,16 +816,16 @@ struct Instance {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct InstanceRaw {
     color: [f32; 4],
-    model: [[f32; 4]; 4],
+    translation: [f32; 4],
+    rotation: [f32; 4],
 }
 
 impl Instance {
     fn to_raw(&self) -> InstanceRaw {
         InstanceRaw {
             color: self.color.clone(),
-            model: (cgmath::Matrix4::from_translation(self.position)
-                * cgmath::Matrix4::from(self.rotation))
-            .into(),
+            translation: self.translation.into(),
+            rotation: self.rotation.into(),
         }
     }
 }
@@ -858,25 +851,24 @@ impl InstanceRaw {
                     offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
                     // While our vertex shader only uses locations 0, and 1 now, in later tutorials, we'll
                     // be using 2, 3, and 4, for Vertex. We'll start at slot 5, not conflict with them later
-                    shader_location: 5,
+                    shader_location: 3,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute {
                     offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
-                    shader_location: 6,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
-                    shader_location: 7,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
-                    shader_location: 8,
+                    shader_location: 4,
                     format: wgpu::VertexFormat::Float32x4,
                 },
             ],
         }
     }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct TimeUniform {
+    time: f32,
+    amplitude: f32,
+    frequency: f32,
+    speed: f32,
 }
