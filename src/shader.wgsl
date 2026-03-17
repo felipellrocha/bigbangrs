@@ -1,5 +1,7 @@
 struct CameraUniform {
-    view_proj: mat4x4<f32>,
+  view_proj: mat4x4<f32>,
+  right: vec4<f32>,
+  up: vec4<f32>,
 };
 @group(0) @binding(0) // 1.
 var<uniform> camera: CameraUniform;
@@ -35,7 +37,11 @@ fn clip_space(
   );
   out.position = camera.view_proj * model_matrix * model.position;
   */
-  out.position = camera.view_proj * vec4<f32>(instance.translation.xyz + model.position.xyz, 1.0);
+  let billboard = camera.right.xyz * model.position.x + camera.up.xyz * model.position.y;
+  //let world_position = instance.translation.xyz + model.position.xyz + billboard;
+  let world_position = instance.translation.xyz + billboard;
+
+  out.position = camera.view_proj * vec4<f32>(world_position.xyz, 1.0);
   return out;
 }
 

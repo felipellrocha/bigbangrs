@@ -13,7 +13,7 @@ use winit::{
     window::Window,
 };
 
-const NUM_INSTANCES: u32 = 100_000;
+const NUM_INSTANCES: u32 = 1_000_000;
 
 pub struct App {
     state: Option<Pipeline>,
@@ -787,6 +787,8 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_co
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    right: [f32; 4],
+    up: [f32; 4],
 }
 
 impl CameraUniform {
@@ -794,11 +796,22 @@ impl CameraUniform {
         use cgmath::SquareMatrix;
         Self {
             view_proj: cgmath::Matrix4::identity().into(),
+            right: [1.0, 0.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0, 0.0],
         }
     }
 
     fn update_view_proj(&mut self, camera: &Camera) {
+        use cgmath::InnerSpace;
+
         self.view_proj = camera.build_view_projection_matrix().into();
+
+        let forward = (camera.target - camera.eye).normalize();
+        let right = forward.cross(camera.up).normalize();
+        let up = right.cross(forward).normalize();
+
+        self.right = [right.x, right.y, right.z, 0.0];
+        self.up = [up.x, up.y, up.z, 0.0];
     }
 }
 
