@@ -85,18 +85,28 @@ impl ApplicationHandler<Pipeline> for App {
                         ..
                     },
                 ..
-            } => state
-                .renderer
-                .handle_key(event_loop, code, key_state.is_pressed()),
+            } => state.renderer.handle_key(
+                event_loop,
+                code,
+                key_state.is_pressed(),
+                &mut state.camera_controller,
+            ),
             WindowEvent::RedrawRequested => {
+                state.camera_controller.update_camera(&mut state.camera);
+
                 //state.movement.update();
-                if let Err(error) =
-                    pollster::block_on(state.movement.update(&state.device, &state.queue))
+                let _ = state.movement.update(&state.device, &state.queue);
+                state.renderer.update(
+                    &state.queue,
+                    &mut state.camera,
+                    &mut state.camera_uniform,
+                    &state.camera_buffer,
+                    &state.camera_controller,
+                );
+                match state
+                    .renderer
+                    .render(&state.device, &state.queue, &state.camera_bind_group)
                 {
-                    log::error!("Movement update failed: {}", error);
-                }
-                state.renderer.update(&state.queue);
-                match state.renderer.render(&state.device, &state.queue) {
                     Ok(_) => {}
                     // Reconfigure the surface if it's lost or outdated
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -122,6 +132,12 @@ pub struct Pipeline {
     queue: wgpu::Queue,
     #[allow(unused)]
     instances: wgpu::Buffer,
+
+    camera: Camera,
+    camera_controller: CameraController,
+    camera_uniform: CameraUniform,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
 
     renderer: Renderer,
     movement: Movement,
@@ -209,72 +225,6 @@ impl Pipeline {
             })
         };
 
-        let movement = Movement::new(&device, &queue, &instances).await.unwrap();
-        let renderer = Renderer::new(
-            window, surface, &instance, &adapter, &device, &queue, &instances,
-        )
-        .await
-        .unwrap();
-
-        Ok(Self {
-            renderer,
-            movement,
-            device,
-            queue,
-            instances,
-        })
-    }
-}
-
-pub struct Renderer {
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
-    is_surface_configured: bool,
-    render_pipeline: wgpu::RenderPipeline,
-    window: Arc<Window>,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    instances: wgpu::Buffer,
-    num_indices: u32,
-    camera: Camera,
-    camera_controller: CameraController,
-    camera_uniform: CameraUniform,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    depth: Texture,
-}
-
-impl Renderer {
-    pub async fn new(
-        window: Arc<Window>,
-        surface: wgpu::Surface<'static>,
-        _instance: &wgpu::Instance,
-        adapter: &wgpu::Adapter,
-        device: &wgpu::Device,
-        _queue: &wgpu::Queue,
-        instances: &wgpu::Buffer,
-    ) -> anyhow::Result<Self> {
-        let size = window.inner_size();
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
-
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width,
-            height: size.height,
-            present_mode: surface_caps.present_modes[0],
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-
         let camera = Camera {
             // position the camera 1 unit up and 2 units back
             // +z is out of the screen
@@ -283,7 +233,7 @@ impl Renderer {
             target: (0.0, 0.0, 0.0).into(),
             // which way is "up"
             up: cgmath::Vector3::unit_y(),
-            aspect: config.width as f32 / config.height as f32,
+            aspect: 1.0,
             fovy: 45.0,
             znear: 0.1,
             zfar: 100.0,
@@ -320,6 +270,86 @@ impl Renderer {
             }],
             label: Some("camera_bind_group"),
         });
+
+        let movement = Movement::new(&device, &queue, &instances, &camera_buffer)
+            .await
+            .unwrap();
+        let renderer = Renderer::new(
+            window,
+            surface,
+            &instance,
+            &adapter,
+            &device,
+            &queue,
+            &camera_bind_group_layout,
+            &movement.visible_instances,
+            &movement.indirect_buffer,
+        )
+        .await
+        .unwrap();
+
+        Ok(Self {
+            renderer,
+            movement,
+            device,
+
+            camera,
+            camera_controller,
+            camera_uniform,
+            camera_buffer,
+            camera_bind_group,
+
+            queue,
+            instances,
+        })
+    }
+}
+
+pub struct Renderer {
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    is_surface_configured: bool,
+    render_pipeline: wgpu::RenderPipeline,
+    window: Arc<Window>,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    visible_instances: wgpu::Buffer,
+    indirect_buffer: wgpu::Buffer,
+    depth: Texture,
+}
+
+impl Renderer {
+    pub async fn new(
+        window: Arc<Window>,
+        surface: wgpu::Surface<'static>,
+        _instance: &wgpu::Instance,
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        camera_bind_group_layout: &wgpu::BindGroupLayout,
+        visible_instances: &wgpu::Buffer,
+        indirect_buffer: &wgpu::Buffer,
+    ) -> anyhow::Result<Self> {
+        let size = window.inner_size();
+
+        let surface_caps = surface.get_capabilities(&adapter);
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: size.width,
+            height: size.height,
+            present_mode: surface_caps.present_modes[0],
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
@@ -389,7 +419,6 @@ impl Renderer {
             contents: bytemuck::cast_slice(INDICES),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let num_indices = INDICES.len() as u32;
 
         let depth = Texture::create_depth_texture(&device, &config, "depth_texture");
 
@@ -401,13 +430,8 @@ impl Renderer {
             window,
             vertex_buffer,
             index_buffer,
-            instances: instances.clone(),
-            num_indices,
-            camera,
-            camera_controller,
-            camera_uniform,
-            camera_buffer,
-            camera_bind_group,
+            visible_instances: visible_instances.clone(),
+            indirect_buffer: indirect_buffer.clone(),
             depth,
         })
     }
@@ -426,6 +450,7 @@ impl Renderer {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        camera_bind_group: &wgpu::BindGroup,
     ) -> Result<(), wgpu::SurfaceError> {
         self.window.request_redraw();
 
@@ -478,12 +503,18 @@ impl Renderer {
             {
                 // draw
                 render_pass.set_pipeline(&self.render_pipeline);
-                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                render_pass.set_bind_group(0, camera_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                /*
                 render_pass.set_vertex_buffer(1, self.instances.slice(..));
                 render_pass
                     .set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 render_pass.draw_indexed(0..self.num_indices, 0, 0..NUM_INSTANCES as _);
+                */
+                render_pass.set_vertex_buffer(1, self.visible_instances.slice(..));
+                render_pass
+                    .set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed_indirect(&self.indirect_buffer, 0);
             }
         }
 
@@ -494,21 +525,31 @@ impl Renderer {
         Ok(())
     }
 
-    fn update(&mut self, queue: &wgpu::Queue) {
-        self.camera_controller.update_camera(&mut self.camera);
-        self.camera_uniform.update_view_proj(&self.camera);
-        queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::cast_slice(&[self.camera_uniform]),
-        );
+    fn update(
+        &mut self,
+        queue: &wgpu::Queue,
+        camera: &mut Camera,
+        camera_uniform: &mut CameraUniform,
+        camera_buffer: &wgpu::Buffer,
+        camera_controller: &CameraController,
+    ) {
+        camera_controller.update_camera(camera);
+        camera_uniform.update_view_proj(camera);
+        //queue.write_buffer(camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
+        queue.write_buffer(camera_buffer, 0, bytemuck::bytes_of(camera_uniform));
     }
 
-    fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
+    fn handle_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        code: KeyCode,
+        is_pressed: bool,
+        camera_controller: &mut CameraController,
+    ) {
         match (code, is_pressed) {
             (KeyCode::Escape, true) => event_loop.exit(),
             _ => {
-                self.camera_controller.handle_key(code, is_pressed);
+                camera_controller.handle_key(code, is_pressed);
             }
         }
     }
@@ -520,6 +561,8 @@ pub struct Movement {
     bind_group: wgpu::BindGroup,
     #[allow(unused)]
     instances: wgpu::Buffer,
+    visible_instances: wgpu::Buffer,
+    indirect_buffer: wgpu::Buffer,
     start_time: Instant,
 }
 
@@ -528,6 +571,7 @@ impl Movement {
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
         instances: &wgpu::Buffer,
+        camera_buffer: &wgpu::Buffer,
     ) -> anyhow::Result<Self> {
         let shader = device.create_shader_module(wgpu::include_wgsl!("movement.wgsl"));
 
@@ -544,6 +588,34 @@ impl Movement {
             label: Some("Simulation Buffer"),
             contents: bytemuck::bytes_of(&simulation_uniform),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let visible_instances_size = (NUM_INSTANCES as wgpu::BufferAddress)
+            * std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress;
+
+        let visible_instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Visible Instances Buffer"),
+            size: visible_instances_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let indirect_args = DrawIndexedIndirectArgsStorage {
+            index_count: INDICES.len() as u32,
+            instance_count: 0,
+            first_index: 0,
+            base_vertex: 0,
+            first_instance: 0,
+        };
+
+        let indirect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Indirect Buffer"),
+            contents: bytemuck::bytes_of(&indirect_args),
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -569,6 +641,36 @@ impl Movement {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -583,6 +685,18 @@ impl Movement {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: simulation_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: visible_instances.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: indirect_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -607,11 +721,13 @@ impl Movement {
             bind_group,
             simulation_buffer,
             instances: instances.clone(),
+            visible_instances,
+            indirect_buffer,
             start_time: Instant::now(),
         })
     }
 
-    async fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<()> {
+    fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<()> {
         let mut encoder = device.create_command_encoder(&Default::default());
 
         let workgroup_size: u32 = 64;
@@ -634,19 +750,18 @@ impl Movement {
 
             queue.write_buffer(&self.simulation_buffer, 0, bytemuck::bytes_of(&uniform));
         }
-
-        /*
         {
-            // We specified 64 threads per workgroup in the shader, so we need to compute how many
-            // workgroups we need to dispatch.
-            let num_dispatches = NUM_INSTANCES.div_ceil(64);
+            // reset indirect args
+            let indirect_args = DrawIndexedIndirectArgsStorage {
+                index_count: INDICES.len() as u32,
+                instance_count: 0,
+                first_index: 0,
+                base_vertex: 0,
+                first_instance: 0,
+            };
 
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.dispatch_workgroups(num_dispatches, 1, 1);
+            queue.write_buffer(&self.indirect_buffer, 0, bytemuck::bytes_of(&indirect_args))
         }
-        */
 
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
@@ -924,4 +1039,14 @@ struct SimulationUniform {
     particle_count: u32,
     workgroups_per_row: u32,
     padding: [u32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct DrawIndexedIndirectArgsStorage {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
 }
