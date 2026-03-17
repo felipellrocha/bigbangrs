@@ -13,9 +13,11 @@ use winit::{
     window::Window,
 };
 
-const NUM_INSTANCES: u32 = 1_000_000;
-//const DELTA_TIME: f32 = 0.016;
+const NUM_INSTANCES: u32 = 2_000_000;
+// const DELTA_TIME: f32 = 0.016;
 const DELTA_TIME: f32 = 0.0016;
+// const GRAVITY: f32 = 2.0;
+const GRAVITY: f32 = 9.18;
 
 pub struct App {
     pipeline: Option<Pipeline>,
@@ -635,7 +637,7 @@ impl Movement {
         let simulation_uniform = SimulationUniform {
             time: 0.0,
             delta_time: DELTA_TIME,
-            gravity_strength: 2.0,
+            gravity_strength: GRAVITY,
             particle_count: NUM_INSTANCES,
             workgroups_per_row: 1,
             padding: Default::default(),
@@ -866,7 +868,7 @@ impl Movement {
             let uniform = SimulationUniform {
                 time: elapsed_seconds,
                 delta_time: DELTA_TIME,
-                gravity_strength: 2.0,
+                gravity_strength: GRAVITY,
                 particle_count: NUM_INSTANCES,
                 workgroups_per_row,
                 padding: Default::default(),
