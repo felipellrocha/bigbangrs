@@ -89,12 +89,13 @@ impl ApplicationHandler<Pipeline> for App {
                 event_loop,
                 code,
                 key_state.is_pressed(),
-                &mut pipeline.camera_controller,
+                &mut pipeline.camera.controller,
             ),
             WindowEvent::RedrawRequested => {
                 pipeline
-                    .camera_controller
-                    .update_camera(&mut pipeline.camera);
+                    .camera
+                    .controller
+                    .update_camera(&mut pipeline.camera.data);
 
                 //pipeline.movement.update();
                 let _ = pipeline
@@ -102,15 +103,15 @@ impl ApplicationHandler<Pipeline> for App {
                     .update(&pipeline.shared.device, &pipeline.shared.queue);
                 pipeline.renderer.update(
                     &pipeline.shared.queue,
-                    &mut pipeline.camera,
-                    &mut pipeline.camera_uniform,
-                    &pipeline.camera_buffer,
-                    &pipeline.camera_controller,
+                    &mut pipeline.camera.data,
+                    &mut pipeline.camera.uniform,
+                    &pipeline.camera.buffer,
+                    &pipeline.camera.controller,
                 );
                 match pipeline.renderer.render(
                     &pipeline.shared.device,
                     &pipeline.shared.queue,
-                    &pipeline.camera_bind_group,
+                    &pipeline.camera.bind_group,
                 ) {
                     Ok(_) => {}
                     // Reconfigure the surface if it's lost or outdated
@@ -132,13 +133,7 @@ impl ApplicationHandler<Pipeline> for App {
 
 pub struct Pipeline {
     shared: Shared,
-
-    camera: Camera,
-    camera_controller: CameraController,
-    camera_uniform: CameraUniform,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-
+    camera: GlobalCamera,
     renderer: Renderer,
     movement: Movement,
 }
@@ -198,57 +193,8 @@ impl Pipeline {
                 })
         };
 
-        let camera = Camera {
-            // position the camera 1 unit up and 2 units back
-            // +z is out of the screen
-            eye: (0.0, 1.0, 2.0).into(),
-            // have it look at the origin
-            target: (0.0, 0.0, 0.0).into(),
-            // which way is "up"
-            up: cgmath::Vector3::unit_y(),
-            aspect: 1.0,
-            fovy: 45.0,
-            znear: 0.1,
-            zfar: 100.0,
-        };
-        let camera_controller = CameraController::new(0.2);
-        let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update_view_proj(&camera);
-
-        let camera_buffer = shared
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Camera Buffer"),
-                contents: bytemuck::cast_slice(&[camera_uniform]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-        let camera_bind_group_layout =
-            shared
-                .device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    entries: &[wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    }],
-                    label: Some("camera_bind_group_layout"),
-                });
-
-        let camera_bind_group = shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-            label: Some("camera_bind_group"),
-        });
-
-        let movement = Movement::new(&shared.device, &shared.queue, &instances, &camera_buffer)
+        let camera = GlobalCamera::new(&shared.device).await.unwrap();
+        let movement = Movement::new(&shared.device, &shared.queue, &instances, &camera.buffer)
             .await
             .unwrap();
         let renderer = Renderer::new(
@@ -260,7 +206,7 @@ impl Pipeline {
             &shared.device,
             &shared.queue,
             //
-            &camera_bind_group_layout,
+            &camera.bind_group_layout,
             &movement.visible_instances,
             &movement.indirect_buffer,
         )
@@ -271,12 +217,7 @@ impl Pipeline {
             shared,
             renderer,
             movement,
-
             camera,
-            camera_controller,
-            camera_uniform,
-            camera_buffer,
-            camera_bind_group,
         })
     }
 }
@@ -330,6 +271,73 @@ impl Shared {
             },
             surface,
         ))
+    }
+}
+
+pub struct GlobalCamera {
+    data: Camera,
+    controller: CameraController,
+    uniform: CameraUniform,
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl GlobalCamera {
+    pub async fn new(device: &wgpu::Device) -> anyhow::Result<Self> {
+        let data = Camera {
+            // position the camera 1 unit up and 2 units back
+            // +z is out of the screen
+            eye: (0.0, 1.0, 2.0).into(),
+            // have it look at the origin
+            target: (0.0, 0.0, 0.0).into(),
+            // which way is "up"
+            up: cgmath::Vector3::unit_y(),
+            aspect: 1.0,
+            fovy: 45.0,
+            znear: 0.1,
+            zfar: 100.0,
+        };
+        let controller = CameraController::new(0.2);
+        let mut uniform = CameraUniform::new();
+        uniform.update_view_proj(&data);
+
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: bytemuck::cast_slice(&[uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+            label: Some("bind_group_layout"),
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+            label: Some("bind_group"),
+        });
+
+        Ok(Self {
+            data,
+            controller,
+            uniform,
+            buffer,
+            bind_group,
+            bind_group_layout,
+        })
     }
 }
 
