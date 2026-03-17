@@ -13,9 +13,9 @@ use winit::{
     window::Window,
 };
 
-const NUM_INSTANCES: u32 = 2_000_000;
+const NUM_INSTANCES: u32 = 4_000_000;
 // const DELTA_TIME: f32 = 0.016;
-const DELTA_TIME: f32 = 0.0016;
+const DELTA_TIME: f32 = 0.0016 * 0.5;
 // const GRAVITY: f32 = 2.0;
 const GRAVITY: f32 = 9.18;
 
@@ -914,7 +914,7 @@ struct Vertex {
     position: [f32; 4],
     //force: [f32; 3],
 }
-const QUAD_SIZE: f32 = 0.01;
+const QUAD_SIZE: f32 = 1.0;
 const VERTICES: &[Vertex] = &[
     Vertex {
         position: [-QUAD_SIZE, -QUAD_SIZE, 0.0, 1.0],
@@ -1185,7 +1185,9 @@ struct DrawIndexedIndirectArgsStorage {
 pub struct VoxelSpace {
     buffers: (wgpu::Buffer, wgpu::Buffer),
 
+    #[allow(unused)]
     voxels: wgpu::Texture,
+    #[allow(unused)]
     voxel_view: wgpu::TextureView,
     grid_uniform: VolumeGridUniform,
     grid_uniform_buffer: wgpu::Buffer,

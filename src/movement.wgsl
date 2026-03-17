@@ -294,7 +294,7 @@ fn main(
 
   instances.values[index] = instance;
   
-  let particle_radius = 0.02;
+  let particle_radius = 0.04;
 
   if (is_visible(instance.translation.xyz, particle_radius)) {
     let visible_index = atomicAdd(&indirect_args.instance_count, 1u);

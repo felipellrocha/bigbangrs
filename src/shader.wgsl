@@ -43,20 +43,29 @@ fn clip_space(
   out.position = camera.view_proj * model_matrix * model.position;
   */
 
-  let billboard = camera.right.xyz * model.position.x + camera.up.xyz * model.position.y;
-  let world_position = instance.translation.xyz + billboard;
-  let view_position = camera.view * vec4<f32>(world_position, 1.0);
-  let depth = -view_position.z;
+  let instance_view_position = camera.view * vec4<f32>(instance.translation.xyz, 1.0);
+  let depth = -instance_view_position.z;
 
   let normalized_depth = clamp(
     (depth - camera.znear) / (camera.zfar - camera.znear),
     0.0,
     1.0
   );
-  let brightness = 1.0 - normalized_depth;
 
+  let brightness = 1.0 - normalized_depth;
   out.brightness = brightness * brightness;
-  out.position = camera.view_proj * vec4<f32>(world_position.xyz, 1.0);
+
+  let depth_curve = normalized_depth * normalized_depth;
+  let particle_scale = 0.01 + (0.04 - 0.01) * depth_curve;
+
+  let scaled_position = model.position.xy * particle_scale;
+  let billboard =
+    camera.right.xyz * scaled_position.x +
+    camera.up.xyz * scaled_position.y;
+
+  let world_position = instance.translation.xyz + billboard;
+
+  out.position = camera.view_proj * vec4<f32>(world_position, 1.0);
   return out;
 }
 
