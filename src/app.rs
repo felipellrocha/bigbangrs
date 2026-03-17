@@ -13,7 +13,7 @@ use winit::{
     window::Window,
 };
 
-const NUM_INSTANCES: u32 = 5_000_000;
+const NUM_INSTANCES: u32 = 1_000_000;
 
 pub struct App {
     pipeline: Option<Pipeline>,
@@ -99,6 +99,9 @@ impl ApplicationHandler<Pipeline> for App {
 
                 //pipeline.movement.update();
                 let _ = pipeline
+                    .space
+                    .update(&pipeline.shared.device, &pipeline.shared.queue);
+                let _ = pipeline
                     .movement
                     .update(&pipeline.shared.device, &pipeline.shared.queue);
                 pipeline.renderer.update(
@@ -136,6 +139,7 @@ pub struct Pipeline {
     camera: GlobalCamera,
     renderer: Renderer,
     movement: Movement,
+    space: VoxelSpace,
 }
 
 impl Pipeline {
@@ -193,6 +197,7 @@ impl Pipeline {
                 })
         };
 
+        let space = VoxelSpace::new(&shared.device, &instances).await.unwrap();
         let camera = GlobalCamera::new(&shared.device).await.unwrap();
         let movement = Movement::new(&shared.device, &shared.queue, &instances, &camera.buffer)
             .await
@@ -218,6 +223,7 @@ impl Pipeline {
             renderer,
             movement,
             camera,
+            space,
         })
     }
 }
@@ -1085,4 +1091,243 @@ struct DrawIndexedIndirectArgsStorage {
     first_index: u32,
     base_vertex: i32,
     first_instance: u32,
+}
+
+pub struct VoxelSpace {
+    buffer: wgpu::Buffer,
+    voxels: wgpu::Texture,
+    voxel_view: wgpu::TextureView,
+    grid_uniform: VolumeGridUniform,
+    grid_uniform_buffer: wgpu::Buffer,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+
+    decay: wgpu::ComputePipeline,
+    splat: wgpu::ComputePipeline,
+    write: wgpu::ComputePipeline,
+}
+
+impl VoxelSpace {
+    pub async fn new(device: &wgpu::Device, instances: &wgpu::Buffer) -> anyhow::Result<Self> {
+        let grid_width: u32 = 100 * 2;
+        let grid_height: u32 = 100 * 2;
+        let grid_depth: u32 = 100 * 2;
+
+        let voxel_count: u32 = grid_width * grid_height * grid_depth;
+
+        let voxel_buffer_size_bytes = voxel_count as u64 * std::mem::size_of::<u32>() as u64;
+
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Voxel Accumulation Buffer"),
+            size: voxel_buffer_size_bytes,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let voxels = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Volume Texture"),
+            size: wgpu::Extent3d {
+                width: grid_width,
+                height: grid_height,
+                depth_or_array_layers: grid_depth,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let voxel_view = voxels.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let grid_uniform = VolumeGridUniform {
+            width: grid_width,
+            height: grid_height,
+            depth: grid_depth,
+            point_count: NUM_INSTANCES,
+
+            world_min: [-100.0, -100.0, -100.0, 0.0],
+            world_max: [100.0, 100.0, 100.0, 0.0],
+
+            deposit_value: 1.0,
+            fixed_point_scale: 1024.0,
+            _padding: [0.0, 0.0],
+        };
+
+        let grid_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Volume Grid Uniform Buffer"),
+            contents: bytemuck::bytes_of(&grid_uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Volume Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::R32Float,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Volume Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: instances.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: grid_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&voxel_view),
+                },
+            ],
+        });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Volume Accumulation Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("voxels.wgsl").into()),
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Volume Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            immediate_size: 0,
+        });
+
+        let decay = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Decay Volume Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("decay_volume"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
+        let splat = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Splat Points Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("splat_points"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
+        let write = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Write Volume Texture Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("write_volume_texture"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
+        Ok(Self {
+            buffer,
+            voxels,
+            voxel_view,
+            grid_uniform,
+            grid_uniform_buffer,
+            bind_group_layout,
+            bind_group,
+
+            decay,
+            splat,
+            write,
+        })
+    }
+
+    fn update(&mut self, device: &wgpu::Device, _queue: &wgpu::Queue) -> anyhow::Result<()> {
+        let mut encoder = device.create_command_encoder(&Default::default());
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Volume Compute Pass"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, &self.bind_group, &[]);
+
+        let dispatch_x = self.grid_uniform.width.div_ceil(8);
+        let dispatch_y = self.grid_uniform.height.div_ceil(8);
+        let dispatch_z = self.grid_uniform.depth.div_ceil(8);
+
+        pass.set_pipeline(&self.decay);
+        pass.dispatch_workgroups(dispatch_x, dispatch_y, dispatch_z);
+
+        let point_dispatch_count = self.grid_uniform.point_count.div_ceil(256);
+
+        pass.set_pipeline(&self.splat);
+        pass.dispatch_workgroups(point_dispatch_count, 1, 1);
+
+        pass.set_pipeline(&self.write);
+        pass.dispatch_workgroups(dispatch_x, dispatch_y, dispatch_z);
+
+        Ok(())
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct VolumeGridUniform {
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub point_count: u32,
+
+    pub world_min: [f32; 4],
+    pub world_max: [f32; 4],
+
+    pub deposit_value: f32,
+    pub fixed_point_scale: f32,
+    pub _padding: [f32; 2],
 }
