@@ -3,10 +3,12 @@ struct CameraUniform {
   view: mat4x4<f32>,
   right: vec4<f32>,
   up: vec4<f32>,
+  forward: vec4<f32>,
   eye: vec4<f32>,
   znear: f32,
   zfar: f32,
-  _padding: vec2<f32>,
+  aspect: f32,
+  fovy_radians: f32,
 };
 @group(0) @binding(0) // 1.
 var<uniform> camera: CameraUniform;

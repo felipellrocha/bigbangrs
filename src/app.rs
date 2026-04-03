@@ -332,7 +332,7 @@ impl GlobalCamera {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -503,7 +503,7 @@ impl Renderer {
         let debug_gravity_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Gravity Debug Pipeline Layout"),
-                bind_group_layouts: &[&debug_gravity_bind_group_layout],
+                bind_group_layouts: &[&debug_gravity_bind_group_layout, camera_bind_group_layout],
                 immediate_size: 0,
             });
 
@@ -682,6 +682,7 @@ impl Renderer {
 
                 render_pass.set_pipeline(&self.debug_gravity_pipeline);
                 render_pass.set_bind_group(0, &self.debug_gravity_bind_group, &[]);
+                render_pass.set_bind_group(1, camera_bind_group, &[]);
                 render_pass.draw(0..6, 0..1);
 
                 render_pass.set_viewport(
@@ -1185,10 +1186,13 @@ struct CameraUniform {
     view: [[f32; 4]; 4],
     right: [f32; 4],
     up: [f32; 4],
+    forward: [f32; 4],
+
     eye: [f32; 4],
     znear: f32,
     zfar: f32,
-    _padding: [f32; 2], // alignment (important!)
+    aspect: f32,
+    fovy_radians: f32,
 }
 
 impl CameraUniform {
@@ -1199,10 +1203,12 @@ impl CameraUniform {
             view: cgmath::Matrix4::identity().into(),
             right: [1.0, 0.0, 0.0, 0.0],
             up: [0.0, 1.0, 0.0, 0.0],
+            forward: [0.0, 0.0, -1.0, 0.0],
             eye: [0.0, 0.0, 0.0, 0.0],
             znear: 0.1,
             zfar: 100.0,
-            _padding: [0.0, 0.0],
+            aspect: 1.0,
+            fovy_radians: 45.0f32.to_radians(),
         }
     }
 
@@ -1218,10 +1224,13 @@ impl CameraUniform {
 
         self.view = view.into();
         self.right = [right.x, right.y, right.z, 0.0];
+        self.forward = [forward.x, forward.y, forward.z, 0.0];
         self.up = [up.x, up.y, up.z, 0.0];
         self.eye = [camera.eye.x, camera.eye.y, camera.eye.z, 1.0];
         self.znear = camera.znear;
         self.zfar = camera.zfar;
+        self.aspect = camera.aspect;
+        self.fovy_radians = camera.fovy.to_radians();
     }
 }
 
