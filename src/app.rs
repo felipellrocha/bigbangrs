@@ -228,6 +228,8 @@ impl Pipeline {
             &camera.bind_group_layout,
             &movement.visible_instances,
             &movement.indirect_buffer,
+            //
+            &space.voxel_view,
         )
         .await
         .unwrap();
@@ -372,6 +374,9 @@ pub struct Renderer {
     visible_instances: wgpu::Buffer,
     indirect_buffer: wgpu::Buffer,
     depth: Texture,
+
+    debug_gravity_pipeline: wgpu::RenderPipeline,
+    debug_gravity_bind_group: wgpu::BindGroup,
 }
 
 impl Renderer {
@@ -385,6 +390,7 @@ impl Renderer {
         camera_bind_group_layout: &wgpu::BindGroupLayout,
         visible_instances: &wgpu::Buffer,
         indirect_buffer: &wgpu::Buffer,
+        voxel_view: &wgpu::TextureView,
     ) -> anyhow::Result<Self> {
         let size = window.inner_size();
 
@@ -465,6 +471,84 @@ impl Renderer {
             cache: None,          // 6.
         });
 
+        let debug_gravity_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Gravity Debug Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                }],
+            });
+
+        let debug_gravity_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Gravity Debug Bind Group"),
+            layout: &debug_gravity_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(voxel_view),
+            }],
+        });
+
+        let debug_gravity_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Gravity Debug Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("debug.wgsl").into()),
+        });
+
+        let debug_gravity_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Gravity Debug Pipeline Layout"),
+                bind_group_layouts: &[&debug_gravity_bind_group_layout],
+                immediate_size: 0,
+            });
+
+        let debug_gravity_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Gravity Debug Pipeline"),
+                layout: Some(&debug_gravity_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &debug_gravity_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[], // CHANGED: fullscreen quad generated from vertex_index.
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &debug_gravity_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING), // CHANGED: overlay alpha blending.
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    // CHANGED: was None; pipeline must match the render pass depth format
+                    format: crate::texture::Texture::DEPTH_FORMAT,
+                    depth_write_enabled: false, // CHANGED: overlay should not write depth
+                    depth_compare: wgpu::CompareFunction::Always, // CHANGED: always draw overlay
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::cast_slice(VERTICES),
@@ -489,6 +573,9 @@ impl Renderer {
             visible_instances: visible_instances.clone(),
             indirect_buffer: indirect_buffer.clone(),
             depth,
+
+            debug_gravity_pipeline,
+            debug_gravity_bind_group,
         })
     }
 
@@ -571,6 +658,41 @@ impl Renderer {
                 render_pass
                     .set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 render_pass.draw_indexed_indirect(&self.indirect_buffer, 0);
+            }
+            {
+                let overlay_width = self.config.width as f32 * 0.5;
+                let overlay_height = self.config.height as f32 * 0.5;
+                let overlay_x = self.config.width as f32 - overlay_width;
+                let overlay_y = self.config.height as f32 - overlay_height;
+
+                render_pass.set_viewport(
+                    overlay_x,
+                    overlay_y,
+                    overlay_width,
+                    overlay_height,
+                    0.0,
+                    1.0,
+                );
+                render_pass.set_scissor_rect(
+                    overlay_x as u32,
+                    overlay_y as u32,
+                    overlay_width as u32,
+                    overlay_height as u32,
+                );
+
+                render_pass.set_pipeline(&self.debug_gravity_pipeline);
+                render_pass.set_bind_group(0, &self.debug_gravity_bind_group, &[]);
+                render_pass.draw(0..6, 0..1);
+
+                render_pass.set_viewport(
+                    0.0,
+                    0.0,
+                    self.config.width as f32,
+                    self.config.height as f32,
+                    0.0,
+                    1.0,
+                );
+                render_pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
             }
         }
 
@@ -1188,7 +1310,7 @@ pub struct VoxelSpace {
     #[allow(unused)]
     voxels: wgpu::Texture,
     #[allow(unused)]
-    voxel_view: wgpu::TextureView,
+    pub voxel_view: wgpu::TextureView,
     grid_uniform: VolumeGridUniform,
     grid_uniform_buffer: wgpu::Buffer,
     //bind_group_layout: wgpu::BindGroupLayout,
