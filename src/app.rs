@@ -182,11 +182,16 @@ impl Pipeline {
                     // let b: f32 = random_generator.random();
 
                     let force = [0.0, 0.0, 0.0, 1.0];
+                    let r = (x + 100.0) / 200.0;
+                    let g = (y + 100.0) / 200.0;
+                    let b = (z + 100.0) / 200.0;
+                    let color = [r, g, b, 1.0];
 
                     Instance {
                         translation,
                         rotation,
                         force,
+                        color,
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1236,6 +1241,7 @@ impl CameraUniform {
 
 struct Instance {
     force: [f32; 4],
+    color: [f32; 4],
     translation: cgmath::Vector4<f32>,
     rotation: cgmath::Quaternion<f32>,
 }
@@ -1246,6 +1252,7 @@ struct InstanceRaw {
     force: [f32; 4],
     translation: [f32; 4],
     rotation: [f32; 4],
+    color: [f32; 4],
 }
 
 impl Instance {
@@ -1254,6 +1261,7 @@ impl Instance {
             force: self.force.clone(),
             translation: self.translation.into(),
             rotation: self.rotation.into(),
+            color: self.color.into(),
         }
     }
 }
@@ -1285,6 +1293,11 @@ impl InstanceRaw {
                 wgpu::VertexAttribute {
                     offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
                     shader_location: 4,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    shader_location: 5,
                     format: wgpu::VertexFormat::Float32x4,
                 },
             ],

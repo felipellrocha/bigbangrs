@@ -13,9 +13,10 @@ struct VolumeGridUniform {
 };
 
 struct InstanceRaw {
-  color: vec4<f32>,
+  force: vec4<f32>,
   translation: vec4<f32>,
   rotation: vec4<f32>,
+  color: vec4<f32>,
 };
 
 struct InstanceBuffer {
